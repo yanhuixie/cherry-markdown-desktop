@@ -139,7 +139,7 @@ pub fn run() {
     );
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             // 当尝试启动第二个实例时，这个回调会被执行
             log::info!("Single instance: Another instance tried to start with args: {:?}", args);
 
