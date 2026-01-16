@@ -458,13 +458,17 @@ async function handleClickLink(href: string) {
     return;
   }
 
+  // 先解码 URL 编码的路径
+  const decodedHref = decodeURI(href);
+
   // 处理相对路径
   const activeTabPath = activeTab.value?.filePath;
-  let fullPath = href;
+  let fullPath = decodedHref;
 
-  if (activeTabPath && !href.match(/^[A-Za-z]:/) && !href.startsWith('/')) {
+  if (activeTabPath && !decodedHref.match(/^[A-Za-z]:/) && !decodedHref.startsWith('/')) {
     // 相对路径，转换为完整路径
     fullPath = resolvePath(activeTabPath, href);
+    fullPath = decodeURI(fullPath);
   }
 
   // 尝试读取文件
@@ -473,7 +477,7 @@ async function handleClickLink(href: string) {
 
     // 调试日志
     console.log('Opening link:', {
-      href,
+      href: decodedHref,
       activeTabPath,
       fullPath,
       contentLength: content.length,
@@ -489,7 +493,7 @@ async function handleClickLink(href: string) {
 
     // 创建新标签
     const separatorRegex = /[/\\]/;
-    const fileName = href.split(separatorRegex).pop() || href;
+    const fileName = decodedHref.split(separatorRegex).pop() || decodedHref;
     const id = `tab-${Date.now()}`;
 
     const newTab = {
