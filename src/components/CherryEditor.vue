@@ -3,6 +3,7 @@ import { onMounted, ref, watch, onBeforeUnmount } from 'vue';
 import Cherry from 'cherry-markdown';
 import { type TabItem, updateTabEditorMode } from '../stores/tabStore';
 import { useTheme } from '../composables/useTheme';
+import { useFontSize, type FontSizeLevel } from '../composables/useFontSize';
 
 const props = defineProps<{
   tab: TabItem | null;
@@ -17,9 +18,35 @@ const emit = defineEmits<{
 const editorRef = ref<HTMLDivElement | null>(null);
 const isDualMode = ref(false);
 const { isDark } = useTheme();
+const { getSizes } = useFontSize();
 let cherryEditor: Cherry | null = null;
 let isInternalChange = false; // 标志位：区分用户编辑和程序更新
 let pendingContentChangeCount = 0; // 计数器：跟踪待处理的内容变化（用于 setValue）
+
+// 更新 Cherry Markdown 的 CSS 字体变量
+const updateFontSizes = () => {
+  const sizes = getSizes();
+
+  // 查找 Cherry Markdown 的容器元素
+  const cherryContainer = editorRef.value?.querySelector('.cherry') as HTMLElement;
+  if (cherryContainer) {
+    cherryContainer.style.setProperty('--font-size-xs', sizes.xs);
+    cherryContainer.style.setProperty('--font-size-sm', sizes.sm);
+    cherryContainer.style.setProperty('--font-size-md', sizes.md);
+    cherryContainer.style.setProperty('--font-size-lg', sizes.lg);
+    cherryContainer.style.setProperty('--font-size-xl', sizes.xl);
+    cherryContainer.style.setProperty('--font-size-2xl', sizes['2xl']);
+    cherryContainer.style.setProperty('--font-size-3xl', sizes['3xl']);
+    console.log('[CherryEditor] Font sizes updated:', sizes);
+  }
+};
+
+// 监听字体大小变化事件
+const handleFontSizeChange = (event: Event) => {
+  const customEvent = event as CustomEvent<{ level: FontSizeLevel }>;
+  console.log('[CherryEditor] Font size changed to:', customEvent.detail.level);
+  updateFontSizes();
+};
 
 const initEditor = () => {
   if (!editorRef.value || !props.tab) return;
@@ -150,8 +177,9 @@ const initEditor = () => {
     callback: {
       onClickPreview: (e: MouseEvent) => {
         const target = e.target as HTMLElement;
-        if (target.tagName === 'A') {
-          const href = target.getAttribute('href');
+        const anchor = target.closest('A');
+        if (anchor) {
+          const href = anchor.getAttribute('href');
           if (href) {
             if (href.endsWith('.md') || href.endsWith('.markdown')) {
               e.preventDefault();
@@ -183,6 +211,10 @@ const initEditor = () => {
         console.log('Cherry Editor initialized');
         // 初始化完成，重置标志
         isInternalChange = false;
+        // 应用初始字体大小
+        setTimeout(() => {
+          updateFontSizes();
+        }, 0);
       },
     },
     themeSettings: {
@@ -387,6 +419,8 @@ onMounted(() => {
   initEditor();
   // 添加键盘事件监听
   window.addEventListener('keydown', handleKeyDown);
+  // 添加字体大小变化监听
+  window.addEventListener('font-size-changed', handleFontSizeChange);
 });
 
 onBeforeUnmount(() => {
@@ -395,6 +429,8 @@ onBeforeUnmount(() => {
   }
   // 移除键盘事件监听
   window.removeEventListener('keydown', handleKeyDown);
+  // 移除字体大小变化监听
+  window.removeEventListener('font-size-changed', handleFontSizeChange);
 });
 
 // 暴露获取内容的方法

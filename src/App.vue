@@ -4,7 +4,7 @@ import { readTextFile, writeTextFile, watch as watchFile } from '@tauri-apps/plu
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { tabs, activeTabId, closeTab, setActiveTab, updateTabContent, markTabSaved } from './stores/tabStore';
+import { tabs, activeTabId, closeTab, setActiveTab, updateTabContent, markTabSaved, addRecentFile } from './stores/tabStore';
 import TabBar from './components/TabBar.vue';
 import Toolbar from './components/Toolbar.vue';
 import CherryEditor from './components/CherryEditor.vue';
@@ -13,12 +13,17 @@ import FileReloadDialog from './components/FileReloadDialog.vue';
 import UnsavedChangesDialog, { type UserChoice } from './components/UnsavedChangesDialog.vue';
 import { useFileOpener } from './composables/useFileOpener';
 
+// 文件监视相关常量
+const FILE_WATCH_DEBOUNCE_MS = 500; // 文件监视的防抖延迟（毫秒）
+const SAVE_FLAG_CLEAR_DELAY_MS = FILE_WATCH_DEBOUNCE_MS + 100; // 保存标志位清除延迟（比防抖延迟多 100ms 确保安全）
+
 // 文件重新加载对话框状态
 const showFileReloadDialog = ref(false);
 const pendingReloadFileName = ref('');
 const pendingReloadFilePath = ref('');
 const pendingReloadHasUnsavedChanges = ref(false);
 let unwatchFn: (() => void) | null = null;
+let isSavingFile = false; // 标志位：标识当前是否正在保存文件（用于区分自身保存和外部修改）
 
 // 未保存变更对话框状态
 const showUnsavedChangesDialog = ref(false);
@@ -144,26 +149,37 @@ onMounted(async () => {
             } else if (choice === 'save') {
               // 保存文件
               console.log('[App] User chose to save');
-              if (tab.filePath && !tab.filePath.startsWith('untitled')) {
-                await writeTextFile(tab.filePath, tab.content);
-                markTabSaved(tab.id);
-              } else {
-                // 未命名文件，需要另存为
-                const filePath = await save({
-                  filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
-                });
-                if (!filePath) {
-                  // 用户取消了另存为，停止关闭流程
-                  console.log('[App] User cancelled save as, stopping close');
-                  pendingCloseTabId.value = null;
-                  pendingCloseFileName.value = '';
-                  showUnsavedChangesDialog.value = false;
-                  return;
+              isSavingFile = true; // 标记正在保存
+              try {
+                if (tab.filePath && !tab.filePath.startsWith('untitled')) {
+                  await writeTextFile(tab.filePath, tab.content);
+                  markTabSaved(tab.id);
+                } else {
+                  // 未命名文件，需要另存为
+                  const filePath = await save({
+                    filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
+                  });
+                  if (!filePath) {
+                    // 用户取消了另存为，停止关闭流程
+                    console.log('[App] User cancelled save as, stopping close');
+                    isSavingFile = false;
+                    pendingCloseTabId.value = null;
+                    pendingCloseFileName.value = '';
+                    showUnsavedChangesDialog.value = false;
+                    return;
+                  }
+                  await writeTextFile(filePath, tab.content);
+                  tab.filePath = filePath;
+                  tab.fileName = filePath.split(/[/\\]/).pop() || filePath;
+                  markTabSaved(tab.id);
                 }
-                await writeTextFile(filePath, tab.content);
-                tab.filePath = filePath;
-                tab.fileName = filePath.split(/[/\\]/).pop() || filePath;
-                markTabSaved(tab.id);
+                // 延迟清除标志位
+                setTimeout(() => {
+                  isSavingFile = false;
+                }, SAVE_FLAG_CLEAR_DELAY_MS);
+              } catch (error) {
+                isSavingFile = false;
+                throw error;
               }
               pendingCloseTabId.value = null;
               pendingCloseFileName.value = '';
@@ -188,6 +204,9 @@ onMounted(async () => {
 
   // 添加键盘事件监听
   window.addEventListener('keydown', handleKeyDown);
+  
+  // 添加最近文件事件监听
+  window.addEventListener('open-recent-file', handleOpenRecentFile);
 });
 
 // 从文件路径打开文件
@@ -202,6 +221,8 @@ async function openFileFromPath(filePath: string) {
     if (existingTab) {
       console.log('[App] File already open, switching to tab');
       setActiveTab(existingTab.id);
+      // 更新最近文件访问时间
+      addRecentFile(filePath);
       return;
     }
 
@@ -215,6 +236,8 @@ async function openFileFromPath(filePath: string) {
       isDirty: false,
     });
     activeTabId.value = id;
+    // 添加到最近文件
+    addRecentFile(filePath);
     console.log('[App] File opened successfully');
   } catch (error) {
     console.error('[App] Failed to open file:', error);
@@ -266,6 +289,8 @@ async function handleOpen() {
     const existingTab = tabs.find(t => t.filePath === filePath);
     if (existingTab) {
       setActiveTab(existingTab.id);
+      // 更新最近文件访问时间
+      addRecentFile(filePath);
       return;
     }
 
@@ -279,6 +304,8 @@ async function handleOpen() {
       isDirty: false,
     });
     activeTabId.value = id;
+    // 添加到最近文件
+    addRecentFile(filePath);
   }
 }
 
@@ -291,8 +318,18 @@ async function handleSave() {
     return;
   }
 
-  await writeTextFile(tab.filePath, tab.content);
-  markTabSaved(tab.id);
+  isSavingFile = true; // 标记正在保存
+  try {
+    await writeTextFile(tab.filePath, tab.content);
+    markTabSaved(tab.id);
+    // 延迟清除标志位，确保文件监视的防抖延迟已过
+    setTimeout(() => {
+      isSavingFile = false;
+    }, SAVE_FLAG_CLEAR_DELAY_MS);
+  } catch (error) {
+    isSavingFile = false;
+    throw error;
+  }
 }
 
 async function handleSaveAs() {
@@ -304,10 +341,20 @@ async function handleSaveAs() {
   });
 
   if (filePath) {
-    await writeTextFile(filePath, tab.content);
-    tab.filePath = filePath;
-    tab.fileName = filePath.split(/[/\\]/).pop() || filePath;
-    markTabSaved(tab.id);
+    isSavingFile = true; // 标记正在保存
+    try {
+      await writeTextFile(filePath, tab.content);
+      tab.filePath = filePath;
+      tab.fileName = filePath.split(/[/\\]/).pop() || filePath;
+      markTabSaved(tab.id);
+      // 延迟清除标志位，确保文件监视的防抖延迟已过
+      setTimeout(() => {
+        isSavingFile = false;
+      }, SAVE_FLAG_CLEAR_DELAY_MS);
+    } catch (error) {
+      isSavingFile = false;
+      throw error;
+    }
   }
 }
 
@@ -359,27 +406,38 @@ async function handleUnsavedChangesChoice(choice: UserChoice) {
     case 'save':
       // 保存文件然后关闭标签页
       console.log('[App] Saving tab:', tab.fileName);
-      if (tab.filePath && !tab.filePath.startsWith('untitled')) {
-        await writeTextFile(tab.filePath, tab.content);
-        markTabSaved(tab.id);
-      } else {
-        // 未命名文件，需要另存为
-        const filePath = await save({
-          filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
-        });
-        if (filePath) {
-          await writeTextFile(filePath, tab.content);
-          tab.filePath = filePath;
-          tab.fileName = filePath.split(/[/\\]/).pop() || filePath;
+      isSavingFile = true; // 标记正在保存
+      try {
+        if (tab.filePath && !tab.filePath.startsWith('untitled')) {
+          await writeTextFile(tab.filePath, tab.content);
           markTabSaved(tab.id);
         } else {
-          // 用户取消了另存为，不关闭标签页
-          console.log('[App] User cancelled save as');
-          showUnsavedChangesDialog.value = false;
-          pendingCloseTabId.value = null;
-          pendingCloseFileName.value = '';
-          return;
+          // 未命名文件，需要另存为
+          const filePath = await save({
+            filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
+          });
+          if (filePath) {
+            await writeTextFile(filePath, tab.content);
+            tab.filePath = filePath;
+            tab.fileName = filePath.split(/[/\\]/).pop() || filePath;
+            markTabSaved(tab.id);
+          } else {
+            // 用户取消了另存为，不关闭标签页
+            console.log('[App] User cancelled save as');
+            isSavingFile = false;
+            showUnsavedChangesDialog.value = false;
+            pendingCloseTabId.value = null;
+            pendingCloseFileName.value = '';
+            return;
+          }
         }
+        // 延迟清除标志位
+        setTimeout(() => {
+          isSavingFile = false;
+        }, SAVE_FLAG_CLEAR_DELAY_MS);
+      } catch (error) {
+        isSavingFile = false;
+        throw error;
       }
       closeTab(tabId);
       showUnsavedChangesDialog.value = false;
@@ -488,6 +546,8 @@ async function handleClickLink(href: string) {
     const existingTab = tabs.find(t => t.filePath === fullPath);
     if (existingTab) {
       setActiveTab(existingTab.id);
+      // 更新最近文件访问时间
+      addRecentFile(fullPath);
       return;
     }
 
@@ -508,6 +568,8 @@ async function handleClickLink(href: string) {
 
     tabs.push(newTab);
     activeTabId.value = id;
+    // 添加到最近文件
+    addRecentFile(fullPath);
   } catch (e) {
     console.error('Failed to open link:', e, 'Path:', fullPath);
   }
@@ -538,7 +600,13 @@ async function startWatchingFile() {
     unwatchFn = await watchFile(
       filePath,
       async (event) => {
-        console.log('[App] File changed:', event, filePath);
+        console.log('[App] File changed:', event, filePath, 'isSavingFile:', isSavingFile);
+
+        // 如果是应用自己保存的，忽略此次变化
+        if (isSavingFile) {
+          console.log('[App] File change caused by self-save, ignoring');
+          return;
+        }
 
         // 动态查找当前文件对应的 tab（避免闭包捕获旧对象）
         const currentTab = tabs.find(t => t.filePath === filePath);
@@ -555,7 +623,7 @@ async function startWatchingFile() {
         showFileReloadDialog.value = true;
       },
       {
-        delayMs: 500, // 防抖延迟 500ms
+        delayMs: FILE_WATCH_DEBOUNCE_MS,
       }
     );
   } catch (error) {
@@ -630,9 +698,37 @@ const handleKeyDown = (event: KeyboardEvent) => {
   }
 };
 
+// 监听打开最近文件事件
+function handleOpenRecentFile(event: Event) {
+  const customEvent = event as CustomEvent<{ filePath: string; content: string }>;
+  const { filePath, content } = customEvent.detail;
+  const fileName = filePath.split(/[/\\]/).pop() || filePath;
+
+  // 检查是否已经打开该文件
+  const existingTab = tabs.find(t => t.filePath === filePath);
+  if (existingTab) {
+    console.log('[App] Recent file already open, switching to tab');
+    setActiveTab(existingTab.id);
+    return;
+  }
+
+  // 创建新标签
+  const id = `tab-${Date.now()}`;
+  tabs.push({
+    id,
+    filePath,
+    fileName,
+    content,
+    isDirty: false,
+  });
+  activeTabId.value = id;
+  console.log('[App] Recent file opened successfully');
+}
+
 // 卸载前移除键盘事件监听
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeyDown);
+  window.removeEventListener('open-recent-file', handleOpenRecentFile);
 });
 </script>
 
