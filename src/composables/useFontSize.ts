@@ -16,6 +16,11 @@ const FONT_SIZE_CONFIGS = {
       '2xl': '24px',
       '3xl': '30px',
     },
+    // TOC 使用较小的字体，避免拥挤
+    tocSizes: {
+      title: '15px',
+      item: '14px',
+    },
   },
   large: {
     label: '大',
@@ -29,6 +34,11 @@ const FONT_SIZE_CONFIGS = {
       '2xl': '30px',
       '3xl': '38px',
     },
+    // TOC 使用较小的字体，避免拥挤
+    tocSizes: {
+      title: '15px',
+      item: '14px',
+    },
   },
   xlarge: {
     label: '超大',
@@ -41,6 +51,11 @@ const FONT_SIZE_CONFIGS = {
       xl: '40px',
       '2xl': '48px',
       '3xl': '60px',
+    },
+    // TOC 使用较小的字体，避免拥挤
+    tocSizes: {
+      title: '15px',
+      item: '14px',
     },
   },
 } as const;
@@ -73,11 +88,16 @@ export function useFontSize() {
     return FONT_SIZE_CONFIGS[currentFontSize.value].sizes;
   };
 
+  const getTocSizes = () => {
+    return FONT_SIZE_CONFIGS[currentFontSize.value].tocSizes;
+  };
+
   return {
     currentFontSize,
     setFontSize,
     getCurrentConfig,
     getSizes,
+    getTocSizes,
     FONT_SIZE_CONFIGS,
   };
 }

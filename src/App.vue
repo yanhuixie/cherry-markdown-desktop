@@ -907,4 +907,10 @@ html.dark .cherry-markdown pre[data-language="mermaid"] svg,
 html.dark .cherry-markdown code.language-mermaid svg {
   filter: invert(0.9) hue-rotate(180deg) !important;
 }
+
+/* 强制在预览模式下显示侧边栏 */
+.cherry.cherry--no-toolbar .cherry-sidebar {
+  display: block !important;
+  height: auto !important;
+}
 </style>

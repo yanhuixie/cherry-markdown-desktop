@@ -18,7 +18,7 @@ const emit = defineEmits<{
 const editorRef = ref<HTMLDivElement | null>(null);
 const isDualMode = ref(false);
 const { isDark } = useTheme();
-const { getSizes } = useFontSize();
+const { getSizes, getTocSizes } = useFontSize();
 let cherryEditor: Cherry | null = null;
 let isInternalChange = false; // 标志位：区分用户编辑和程序更新
 let pendingContentChangeCount = 0; // 计数器：跟踪待处理的内容变化（用于 setValue）
@@ -26,10 +26,12 @@ let pendingContentChangeCount = 0; // 计数器：跟踪待处理的内容变化
 // 更新 Cherry Markdown 的 CSS 字体变量
 const updateFontSizes = () => {
   const sizes = getSizes();
+  const tocSizes = getTocSizes();
 
   // 查找 Cherry Markdown 的容器元素
   const cherryContainer = editorRef.value?.querySelector('.cherry') as HTMLElement;
   if (cherryContainer) {
+    // 设置主字体大小变量
     cherryContainer.style.setProperty('--font-size-xs', sizes.xs);
     cherryContainer.style.setProperty('--font-size-sm', sizes.sm);
     cherryContainer.style.setProperty('--font-size-md', sizes.md);
@@ -37,7 +39,19 @@ const updateFontSizes = () => {
     cherryContainer.style.setProperty('--font-size-xl', sizes.xl);
     cherryContainer.style.setProperty('--font-size-2xl', sizes['2xl']);
     cherryContainer.style.setProperty('--font-size-3xl', sizes['3xl']);
-    console.log('[CherryEditor] Font sizes updated:', sizes);
+
+    // 设置 TOC 字体大小（避免 TOC 拥挤）
+    // 直接在 TOC 容器上设置，所有子元素继承
+    const tocContainer = cherryContainer.querySelector('.cherry-flex-toc') as HTMLElement;
+    if (tocContainer) {
+      tocContainer.style.fontSize = tocSizes.item;
+      console.log('[CherryEditor] TOC font size set to:', tocSizes.item);
+    }
+    const tocTitle = cherryContainer.querySelector('.cherry-toc-title') as HTMLElement;
+    if (tocTitle) {
+      tocTitle.style.fontSize = tocSizes.title;
+    }
+    console.log('[CherryEditor] Font sizes updated:', sizes, 'TOC sizes:', tocSizes);
   }
 };
 

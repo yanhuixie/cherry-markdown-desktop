@@ -20,7 +20,7 @@ const emit = defineEmits<{
           <div class="modal-body">
             <div class="about-section">
               <p class="about-title">Cherry Markdown Desktop</p>
-              <p class="about-version">版本 0.1.0</p>
+              <p class="about-version">版本 0.1.1</p>
             </div>
 
             <div class="about-section">
