@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue';
-import { readTextFile, writeTextFile, watch as watchFile } from '@tauri-apps/plugin-fs';
+import { readTextFile, writeTextFile, writeFile, watch as watchFile } from '@tauri-apps/plugin-fs';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -11,6 +11,8 @@ import CherryEditor from './components/CherryEditor.vue';
 import AboutDialog from './components/AboutDialog.vue';
 import FileReloadDialog from './components/FileReloadDialog.vue';
 import UnsavedChangesDialog, { type UserChoice } from './components/UnsavedChangesDialog.vue';
+import ExportFormatDialog, { type ExportFormat } from './components/ExportFormatDialog.vue';
+import LoadingDialog from './components/LoadingDialog.vue';
 import { useFileOpener } from './composables/useFileOpener';
 
 // 文件监视相关常量
@@ -41,6 +43,13 @@ const activeTab = computed(() => tabs.find(t => t.id === activeTabId.value) || n
 
 // 关于对话框状态
 const showAbout = ref(false);
+
+// 导出格式对话框状态
+const showExportFormatDialog = ref(false);
+
+// 加载对话框状态
+const showLoadingDialog = ref(false);
+const loadingMessage = ref('');
 
 // Cherry Editor 组件引用
 const cherryEditorRef = ref<InstanceType<typeof CherryEditor> | null>(null);
@@ -336,26 +345,157 @@ async function handleSaveAs() {
   const tab = activeTab.value;
   if (!tab) return;
 
-  const filePath = await save({
-    filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
-  });
+  // 显示导出格式选择对话框
+  showExportFormatDialog.value = true;
+}
 
-  if (filePath) {
-    isSavingFile = true; // 标记正在保存
-    try {
-      await writeTextFile(filePath, tab.content);
-      tab.filePath = filePath;
-      tab.fileName = filePath.split(/[/\\]/).pop() || filePath;
-      markTabSaved(tab.id);
-      // 延迟清除标志位，确保文件监视的防抖延迟已过
-      setTimeout(() => {
-        isSavingFile = false;
-      }, SAVE_FLAG_CLEAR_DELAY_MS);
-    } catch (error) {
-      isSavingFile = false;
-      throw error;
+// 处理导出格式选择
+async function handleExportFormatSelect(format: ExportFormat) {
+  const tab = activeTab.value;
+  if (!tab || !cherryEditorRef.value) return;
+
+  console.log('[App] Export format selected:', format);
+
+  try {
+    switch (format) {
+      case 'markdown': {
+        // Markdown：使用 Tauri 保存对话框
+        const filePath = await save({
+          filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
+        });
+
+        if (filePath) {
+          isSavingFile = true;
+          try {
+            await writeTextFile(filePath, tab.content);
+            tab.filePath = filePath;
+            tab.fileName = filePath.split(/[/\\]/).pop() || filePath;
+            markTabSaved(tab.id);
+            alert(`✅ Markdown 文件已保存到：\n${filePath}`);
+            setTimeout(() => {
+              isSavingFile = false;
+            }, SAVE_FLAG_CLEAR_DELAY_MS);
+          } catch (error) {
+            isSavingFile = false;
+            alert(`❌ 保存 Markdown 文件失败：${error}`);
+            throw error;
+          }
+        }
+        break;
+      }
+
+      case 'html': {
+        // HTML：获取内容并使用 Tauri 保存对话框
+        const exportData = cherryEditorRef.value.getExportContent('html');
+        const filePath = await save({
+          filters: [{ name: 'HTML', extensions: ['html'] }],
+          defaultPath: `${exportData.filename}.html`,
+        });
+
+        if (filePath) {
+          try {
+            await writeTextFile(filePath, exportData.content as string);
+            alert(`✅ HTML 文件已保存到：\n${filePath}`);
+          } catch (error) {
+            alert(`❌ 保存 HTML 文件失败：${error}`);
+            throw error;
+          }
+        }
+        break;
+      }
+
+      case 'docx': {
+        // DOCX：生成 Word 文档并保存
+        loadingMessage.value = '正在生成 Word 文档，请稍候...';
+        showLoadingDialog.value = true;
+
+        // 等待 DOM 更新，确保 loading dialog 能够渲染
+        await nextTick();
+
+        // 延迟一小段时间，让 loading dialog 完全渲染
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+        try {
+          const { blob, filename } = await cherryEditorRef.value.exportDOCX();
+          showLoadingDialog.value = false;
+
+          // 让用户选择保存路径
+          const filePath = await save({
+            filters: [{ name: 'Word 文档', extensions: ['docx'] }],
+            defaultPath: `${filename}.docx`,
+          });
+
+          if (filePath) {
+            // 将 Blob 转换为 Uint8Array
+            const arrayBuffer = await blob.arrayBuffer();
+            const uint8Array = new Uint8Array(arrayBuffer);
+
+            // 写入二进制文件
+            await writeFile(filePath, uint8Array);
+            alert(`✅ Word 文档已保存到：\n${filePath}`);
+          }
+        } catch (error) {
+          showLoadingDialog.value = false;
+          alert(`❌ 导出 Word 文档失败：${error}`);
+          throw error;
+        }
+        break;
+      }
+
+      case 'pdf': {
+        // PDF：使用 Cherry 的打印对话框（浏览器限制）
+        // 用户已在 ExportFormatDialog 中看到说明
+        cherryEditorRef.value.exportContent('pdf');
+        break;
+      }
+
+      case 'png': {
+        // PNG：生成完整内容的图片并保存
+        loadingMessage.value = '正在生成 PNG 图片，请稍候...';
+        showLoadingDialog.value = true;
+
+        // 等待 DOM 更新，确保 loading dialog 能够渲染
+        await nextTick();
+
+        // 延迟一小段时间，让 loading dialog 完全渲染
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+        try {
+          const { blob, filename } = await cherryEditorRef.value.exportPNG();
+          showLoadingDialog.value = false;
+
+          // 让用户选择保存路径
+          const filePath = await save({
+            filters: [{ name: 'PNG 图片', extensions: ['png'] }],
+            defaultPath: `${filename}.png`,
+          });
+
+          if (filePath) {
+            // 将 Blob 转换为 Uint8Array
+            const arrayBuffer = await blob.arrayBuffer();
+            const uint8Array = new Uint8Array(arrayBuffer);
+
+            // 写入二进制文件
+            await writeFile(filePath, uint8Array);
+            alert(`✅ PNG 图片已保存到：\n${filePath}`);
+          }
+        } catch (error) {
+          showLoadingDialog.value = false;
+          alert(`❌ 导出 PNG 失败：${error}`);
+          throw error;
+        }
+        break;
+      }
+
+      default:
+        throw new Error(`不支持的导出格式: ${format}`);
     }
+  } catch (error) {
+    console.error('[App] Export failed:', error);
+    // 错误已经在上面的 catch 块中处理了
   }
+
+  showExportFormatDialog.value = false;
 }
 
 async function handleCloseTab(id: string) {
@@ -756,6 +896,12 @@ onBeforeUnmount(() => {
       </div>
     </div>
     <AboutDialog :visible="showAbout" @close="showAbout = false" />
+    <LoadingDialog :visible="showLoadingDialog" :message="loadingMessage" />
+    <ExportFormatDialog
+      :visible="showExportFormatDialog"
+      @select="handleExportFormatSelect"
+      @close="showExportFormatDialog = false"
+    />
     <FileReloadDialog
       :visible="showFileReloadDialog"
       :file-name="pendingReloadFileName"

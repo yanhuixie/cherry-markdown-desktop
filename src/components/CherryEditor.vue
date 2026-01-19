@@ -4,6 +4,7 @@ import Cherry from 'cherry-markdown';
 import { type TabItem, updateTabEditorMode } from '../stores/tabStore';
 import { useTheme } from '../composables/useTheme';
 import { useFontSize, type FontSizeLevel } from '../composables/useFontSize';
+import type { ExportFormat } from './ExportFormatDialog.vue';
 
 const props = defineProps<{
   tab: TabItem | null;
@@ -515,7 +516,223 @@ const toggleMode = () => {
   }
 };
 
-defineExpose({ getContent, toggleMode });
+// 导出内容为指定格式（返回内容而非直接导出）
+const getExportContent = (format: ExportFormat): { content: string | Blob; filename: string; mimeType: string } => {
+  if (!cherryEditor) {
+    throw new Error('Editor not initialized');
+  }
+
+  const defaultFilename = props.tab?.fileName.replace(/\.(md|markdown)$/i, '') || 'document';
+
+  switch (format) {
+    case 'markdown':
+      // 获取 Markdown 源内容
+      const mdContent = cherryEditor.getMarkdown();
+      return {
+        content: mdContent,
+        filename: defaultFilename,
+        mimeType: 'text/markdown',
+      };
+
+    case 'html':
+      // 获取渲染后的 HTML 内容
+      const htmlContent = cherryEditor.getHtml();
+      // 包装成完整的 HTML 文档
+      const fullHtml = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${defaultFilename}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; line-height: 1.6; }
+    pre { background: #f6f8fa; padding: 16px; overflow: auto; }
+    code { background: #f6f8fa; padding: 2px 6px; }
+    pre code { background: none; padding: 0; }
+    img { max-width: 100%; }
+  </style>
+</head>
+<body>
+${htmlContent}
+</body>
+</html>`;
+      return {
+        content: fullHtml,
+        filename: defaultFilename,
+        mimeType: 'text/html',
+      };
+
+    case 'pdf':
+      // PDF 需要使用打印对话框，这里返回特殊标记
+      return {
+        content: 'USE_PRINT_DIALOG',
+        filename: defaultFilename,
+        mimeType: 'application/pdf',
+      };
+
+    case 'png':
+      // PNG 需要异步处理，返回特殊标记
+      return {
+        content: 'USE_ASYNC_EXPORT',
+        filename: defaultFilename,
+        mimeType: 'image/png',
+      };
+
+    case 'docx':
+      // DOCX 需要异步处理，返回特殊标记
+      return {
+        content: 'USE_ASYNC_EXPORT',
+        filename: defaultFilename,
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      };
+
+    default:
+      throw new Error(`Unsupported export format: ${format}`);
+  }
+};
+
+// 异步导出 PNG 图片（参考官方源码实现）
+const exportPNG = async (): Promise<{ blob: Blob; filename: string }> => {
+  if (!cherryEditor || !editorRef.value) {
+    throw new Error('Editor not initialized');
+  }
+
+  // 动态导入 html2canvas
+  const html2canvas = (await import('html2canvas')).default;
+
+  // 获取预览区域 DOM
+  const previewerDom = editorRef.value.querySelector('.cherry-previewer') as HTMLElement;
+  if (!previewerDom) {
+    throw new Error('Previewer not found');
+  }
+
+  const defaultFilename = props.tab?.fileName.replace(/\.(md|markdown)$/i, '') || 'document';
+
+  // 参考 Cherry 官方的 getReadyToExport 实现
+  return new Promise<{ blob: Blob; filename: string }>((resolve, reject) => {
+    // 1. 克隆预览区域
+    const cherryPreviewer = previewerDom.cloneNode(true) as HTMLElement;
+    cherryPreviewer.className = cherryPreviewer.className.replace('cherry-previewer--hidden', '');
+
+    // 2. 设置样式为完整显示
+    cherryPreviewer.style.width = '100%';
+    cherryPreviewer.style.height = 'auto';
+    cherryPreviewer.style.maxHeight = 'none';
+
+    // 3. 修复 MathJax 辅助元素
+    const mmls = cherryPreviewer.querySelectorAll('mjx-assistive-mml');
+    mmls.forEach((e) => {
+      if (e instanceof HTMLElement) e.style.setProperty('visibility', 'hidden');
+    });
+
+    // 4. 创建包装器并复制主题类名
+    const cherryWrapper = document.createElement('div');
+    cherryWrapper.className = 'cherry-export-wrapper';
+    const cherryInstance = previewerDom.closest('.cherry');
+    if (cherryInstance) {
+      cherryWrapper.className = `${cherryWrapper.className} ${cherryInstance.className}`;
+    }
+
+    cherryWrapper.appendChild(cherryPreviewer);
+    document.body.appendChild(cherryWrapper);
+
+    // 5. 保存原始 body overflow
+    const bodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'visible';
+
+    // 6. 清理函数
+    const cleanup = () => {
+      cherryWrapper.remove();
+      document.body.style.overflow = bodyOverflow;
+    };
+
+    // 7. 滚动到顶部
+    window.scrollTo(0, 0);
+
+    // 8. 去掉 audio 和 video 标签
+    cherryPreviewer.innerHTML = cherryPreviewer.innerHTML.replace(/<audio [^>]+?>([^\n]*?)<\/audio>/g, '$1');
+    cherryPreviewer.innerHTML = cherryPreviewer.innerHTML.replace(/<video [^>]+?>([^\n]*?)<\/video>/g, '$1');
+
+    // 9. 强制展开所有代码块
+    cherryPreviewer.innerHTML = cherryPreviewer.innerHTML.replace(
+      /class="cherry-code-unExpand("| )/g,
+      'class="cherry-code-expand$1',
+    );
+
+    // 10. 使用 html2canvas 生成图片
+    html2canvas(cherryPreviewer, {
+      allowTaint: true,
+      height: cherryPreviewer.clientHeight,
+      width: cherryPreviewer.clientWidth,
+      scrollY: 0,
+      scrollX: 0,
+    }).then((canvas) => {
+      // 11. 转换为 PNG 格式（修复官方源码使用 JPEG 的问题）
+      canvas.toBlob((blob: Blob | null) => {
+        cleanup();
+        if (blob) {
+          resolve({ blob, filename: defaultFilename });
+        } else {
+          reject(new Error('Failed to generate PNG image'));
+        }
+      }, 'image/png');
+    }).catch((error) => {
+      cleanup();
+      reject(error);
+    });
+  });
+};
+
+// 解析 Markdown 并导出为 Word 文档
+const exportDOCX = async (): Promise<{ blob: Blob; filename: string }> => {
+  if (!cherryEditor) {
+    throw new Error('Editor not initialized');
+  }
+
+  // 动态导入 md2docx 库
+  const { md2docx } = await import('@md2docx/md2docx');
+
+  // 获取 Markdown 内容
+  const markdown = cherryEditor.getMarkdown();
+  const defaultFilename = props.tab?.fileName.replace(/\.(md|markdown)$/i, '') || 'document';
+
+  // 使用 md2docx 直接将 Markdown 转换为 DOCX
+  // 参数: markdown, docxProps, sectionProps, outputType, pluginProps
+  const blob = await md2docx(
+    markdown,
+    undefined,  // docxProps (使用默认)
+    undefined,  // sectionProps (使用默认)
+    undefined,  // outputType (默认 "blob")
+    {
+      // pluginProps - 配置各种插件选项
+      mermaid: {
+        mermaidConfig: {
+          theme: isDark.value ? 'dark' : 'default',
+        },
+      },
+    }
+  ) as Blob;
+
+  return { blob, filename: defaultFilename };
+};
+
+// 导出内容（使用 Cherry 的 export 方法用于 PDF）
+const exportContent = (format: ExportFormat, filename?: string) => {
+  if (!cherryEditor) {
+    console.warn('[CherryEditor] Cannot export: editor not initialized');
+    return;
+  }
+
+  const defaultFilename = filename || props.tab?.fileName.replace(/\.(md|markdown)$/i, '') || 'document';
+
+  // PDF 使用 Cherry 的打印对话框
+  if (format === 'pdf') {
+    // @ts-ignore - Cherry Markdown 的 export API
+    cherryEditor.export('pdf', defaultFilename);
+  }
+};
+
+defineExpose({ getContent, toggleMode, exportContent, getExportContent, exportPNG, exportDOCX });
 </script>
 
 <template>
