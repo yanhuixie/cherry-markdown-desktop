@@ -138,3 +138,33 @@ export function updateTabEditorMode(id: string, mode: 'previewOnly' | 'edit&prev
 export function getActiveTab(): TabItem | null {
   return tabs.find(t => t.id === activeTabId.value) || null;
 }
+
+/**
+ * 关闭左侧所有标签页
+ */
+export function closeLeftTabs(id: string): void {
+  const index = tabs.findIndex(t => t.id === id);
+  if (index > 0) {
+    const toRemove = tabs.slice(0, index).map(t => t.id);
+    toRemove.forEach(tabId => closeTab(tabId));
+  }
+}
+
+/**
+ * 关闭右侧所有标签页
+ */
+export function closeRightTabs(id: string): void {
+  const index = tabs.findIndex(t => t.id === id);
+  if (index !== -1 && index < tabs.length - 1) {
+    const toRemove = tabs.slice(index + 1).map(t => t.id);
+    toRemove.forEach(tabId => closeTab(tabId));
+  }
+}
+
+/**
+ * 关闭所有标签页
+ */
+export function closeAllTabs(): void {
+  tabs.splice(0, tabs.length);
+  activeTabId.value = null;
+}

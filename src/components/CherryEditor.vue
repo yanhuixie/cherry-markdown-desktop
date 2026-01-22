@@ -1,10 +1,43 @@
 <script setup lang="ts">
 import { onMounted, ref, watch, onBeforeUnmount } from 'vue';
-import Cherry from 'cherry-markdown';
+// 使用 cherry-markdown core 版本（不包含内置 mermaid）
+import Cherry from 'cherry-markdown/dist/cherry-markdown.core.js';
 import { type TabItem, updateTabEditorMode } from '../stores/tabStore';
 import { useTheme } from '../composables/useTheme';
 import { useFontSize, type FontSizeLevel } from '../composables/useFontSize';
+import { useFontFamily } from '../composables/useFontFamily';
 import type { ExportFormat } from './ExportFormatDialog.vue';
+
+// 异步加载 mermaid 和 mermaid 插件
+// 按照 Cherry Markdown 官方 wiki 方式三：https://tencent.github.io/cherry-markdown/examples/mermaid.html
+const initMermaidPlugin = async () => {
+  try {
+    // 动态导入 mermaid 11.12.2
+    const mermaidModule = await import('mermaid');
+    const mermaid = (mermaidModule as any).default || mermaidModule;
+
+    // 动态导入 Cherry Markdown 的 mermaid 插件
+    const MermaidCodeEngineModule = await import('cherry-markdown/dist/addons/cherry-code-block-mermaid-plugin.js');
+    const MermaidCodeEngine = (MermaidCodeEngineModule as any).default || MermaidCodeEngineModule;
+
+    // 注册 mermaid 插件到 Cherry
+    // 注意：mermaid v10+ 直接使用 mermaid 作为 API，不再有 mermaid.mermaidAPI
+    Cherry.usePlugin(MermaidCodeEngine, {
+      mermaid,
+      mermaidAPI: mermaid, // v10+ 直接使用 mermaid
+    });
+
+    console.log('[CherryEditor] Mermaid plugin registered successfully');
+    console.log('[CherryEditor] Mermaid loaded:', typeof mermaid);
+    return true;
+  } catch (error) {
+    console.error('[CherryEditor] Failed to load mermaid plugin:', error);
+    return false;
+  }
+};
+
+// 标记 mermaid 插件是否已初始化
+let mermaidPluginInitialized = false;
 
 const props = defineProps<{
   tab: TabItem | null;
@@ -20,9 +53,10 @@ const editorRef = ref<HTMLDivElement | null>(null);
 const isDualMode = ref(false);
 const { isDark } = useTheme();
 const { getSizes, getTocSizes } = useFontSize();
+const { isMonospace, initFontFamily } = useFontFamily();
 let cherryEditor: Cherry | null = null;
 let isInternalChange = false; // 标志位：区分用户编辑和程序更新
-let pendingContentChangeCount = 0; // 计数器：跟踪待处理的内容变化（用于 setValue）
+let isSwitchingTab = false; // 标志位：标识正在切换标签（防止首次编辑被误判为内部更新）
 
 // 更新 Cherry Markdown 的 CSS 字体变量
 const updateFontSizes = () => {
@@ -63,7 +97,37 @@ const handleFontSizeChange = (event: Event) => {
   updateFontSizes();
 };
 
-const initEditor = () => {
+// 设置预览区域的字体类型
+const updateFontFamily = () => {
+  const previewerDom = editorRef.value?.querySelector('.cherry-previewer') as HTMLElement;
+  if (previewerDom) {
+    if (isMonospace.value) {
+      previewerDom.classList.add('cherry-previewer-monospace');
+    } else {
+      previewerDom.classList.remove('cherry-previewer-monospace');
+    }
+    console.log('[CherryEditor] Font family updated, isMonospace:', isMonospace.value);
+  }
+};
+
+// 监听等宽字体变化事件
+const handleFontFamilyChange = (event: Event) => {
+  const customEvent = event as CustomEvent<{ isMonospace: boolean }>;
+  const isMonospaceValue = customEvent.detail.isMonospace;
+  console.log('[CherryEditor] Font family changed:', isMonospaceValue);
+  
+  const previewerDom = editorRef.value?.querySelector('.cherry-previewer') as HTMLElement;
+  if (previewerDom) {
+    if (isMonospaceValue) {
+      previewerDom.classList.add('cherry-previewer-monospace');
+    } else {
+      previewerDom.classList.remove('cherry-previewer-monospace');
+    }
+    console.log('[CherryEditor] Font family updated, isMonospace:', isMonospaceValue);
+  }
+};
+
+const initEditor = async () => {
   if (!editorRef.value || !props.tab) return;
 
   // 确保 content 是字符串类型
@@ -74,6 +138,16 @@ const initEditor = () => {
 
   console.log('Initializing Cherry Editor with theme:', isDark.value ? 'dark' : 'light');
   console.log('themeSettings.mainTheme:', isDark.value ? 'abyss' : 'default');
+
+  // 初始化 mermaid 插件（如果还没初始化）
+  if (!mermaidPluginInitialized) {
+    const success = await initMermaidPlugin();
+    if (success) {
+      mermaidPluginInitialized = true;
+    } else {
+      console.warn('[CherryEditor] Mermaid plugin initialization failed, continuing without mermaid support');
+    }
+  }
 
   // 清除可能的主题缓存
   try {
@@ -206,14 +280,11 @@ const initEditor = () => {
       },
       afterChange: (newContent: string) => {
         if (typeof newContent === 'string') {
-          console.log('[CherryEditor] afterChange called, isInternalChange:', isInternalChange, 'pendingContentChangeCount:', pendingContentChangeCount, 'tab:', props.tab?.id, 'content length:', newContent.length);
+          console.log('[CherryEditor] afterChange called, isInternalChange:', isInternalChange, 'isSwitchingTab:', isSwitchingTab, 'tab:', props.tab?.id, 'content length:', newContent.length);
 
           // 如果是内部变化（初始化或程序设置），不emit
-          if (isInternalChange || pendingContentChangeCount > 0) {
+          if (isInternalChange || isSwitchingTab) {
             console.log('[CherryEditor] Skipping emit (internal change)');
-            if (pendingContentChangeCount > 0) {
-              pendingContentChangeCount--;
-            }
             return;
           }
 
@@ -299,15 +370,24 @@ watch(
       }
     }
 
+    // 标记为正在切换标签（防止 setValue 的 afterChange 被误判为用户编辑）
+    isSwitchingTab = true;
+
     // 更新编辑器内容
     const content = String(props.tab.content ?? '');
     const currentValue = cherryEditor.getValue();
     const currentStr = typeof currentValue === 'string' ? currentValue : '';
 
     if (currentStr !== content) {
-      pendingContentChangeCount++; // 标记为内部更新
       cherryEditor.setValue(content);
     }
+
+    // 延迟重置标志位，确保 setValue 的 afterChange 已经触发完毕
+    // 使用 100ms 延迟，确保 Cherry Markdown 内部处理完成
+    setTimeout(() => {
+      isSwitchingTab = false;
+      console.log(`[CherryEditor] Tab switch completed for ${newId}, isSwitchingTab reset to false`);
+    }, 100);
 
     // 恢复新 Tab 的编辑器模式
     const savedMode = props.tab.editorMode;
@@ -373,8 +453,15 @@ watch(
       const currentStr = typeof currentValue === 'string' ? currentValue : '';
 
       if (currentStr !== content) {
-        pendingContentChangeCount++; // 标记为内部更新
+        // 标记为内部更新（防止 afterChange 被误判为用户编辑）
+        isSwitchingTab = true;
         cherryEditor.setValue(content);
+
+        // 延迟重置标志位
+        setTimeout(() => {
+          isSwitchingTab = false;
+          console.log('[CherryEditor] Content update completed, isSwitchingTab reset to false');
+        }, 100);
       }
     }
   }
@@ -384,7 +471,7 @@ watch(
 watch(isDark, (newValue) => {
   console.log('Theme changed, isDark:', newValue);
   console.log('Will reinitialize with mainTheme:', newValue ? 'abyss' : 'default');
-  
+
   if (cherryEditor) {
     // 尝试直接设置主题（如果 Cherry 支持）
     try {
@@ -400,8 +487,8 @@ watch(isDark, (newValue) => {
         cherryEditor = null;
 
         // 重新创建编辑器
-        setTimeout(() => {
-          initEditor();
+        setTimeout(async () => {
+          await initEditor();
         }, 0);
       }
     } catch (e) {
@@ -413,11 +500,16 @@ watch(isDark, (newValue) => {
       }
 
       // 重新创建编辑器
-      setTimeout(() => {
-        initEditor();
+      setTimeout(async () => {
+        await initEditor();
       }, 0);
     }
   }
+});
+
+// 监听等宽字体状态变化
+watch(isMonospace, () => {
+  updateFontFamily();
 });
 
 // 处理键盘快捷键
@@ -430,12 +522,24 @@ const handleKeyDown = (event: KeyboardEvent) => {
   }
 };
 
-onMounted(() => {
-  initEditor();
+onMounted(async () => {
+  await initEditor();
+  // 初始化字体类型
+  initFontFamily();
+  // 应用初始等宽字体设置（延迟执行确保DOM已渲染）
+  setTimeout(() => {
+    const previewerDom = editorRef.value?.querySelector('.cherry-previewer') as HTMLElement;
+    if (previewerDom && isMonospace.value) {
+      previewerDom.classList.add('cherry-previewer-monospace');
+      console.log('[CherryEditor] Initial font family applied, isMonospace:', isMonospace.value);
+    }
+  }, 100);
   // 添加键盘事件监听
   window.addEventListener('keydown', handleKeyDown);
   // 添加字体大小变化监听
   window.addEventListener('font-size-changed', handleFontSizeChange);
+  // 添加字体类型变化监听
+  window.addEventListener('font-family-changed', handleFontFamilyChange);
 });
 
 onBeforeUnmount(() => {
@@ -446,6 +550,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeyDown);
   // 移除字体大小变化监听
   window.removeEventListener('font-size-changed', handleFontSizeChange);
+  // 移除字体类型变化监听
+  window.removeEventListener('font-family-changed', handleFontFamilyChange);
 });
 
 // 暴露获取内容的方法
@@ -743,5 +849,45 @@ defineExpose({ getContent, toggleMode, exportContent, getExportContent, exportPN
 .cherry-editor {
   width: 100%;
   height: 100%;
+}
+</style>
+
+<style>
+/* 全局样式：预览区域等宽字体 */
+.cherry-previewer-monospace,
+.cherry-previewer-monospace .cherry-markdown {
+  font-family: 'Fira Code', 'Source Code Pro', 'Consolas', 'Monaco', 'Courier New', monospace !important;
+}
+
+/* 确保所有子元素也使用等宽字体 */
+.cherry-previewer-monospace * {
+  font-family: inherit !important;
+}
+
+/* 确保pre标签也使用等宽字体 */
+.cherry-previewer-monospace pre,
+.cherry-previewer-monospace code {
+  font-family: 'Fira Code', 'Source Code Pro', 'Consolas', 'Monaco', 'Courier New', monospace !important;
+}
+
+/* 覆盖Cherry Markdown代码块的字体（处理highlight.js等语法高亮） */
+.cherry-previewer-monospace pre[class*="language-"],
+.cherry-previewer-monospace code[class*="language-"] {
+  font-family: 'Fira Code', 'Source Code Pro', 'Consolas', 'Monaco', 'Courier New', monospace !important;
+  font-size: 14px !important;
+}
+
+/* 覆盖Cherry Markdown代码块容器的字体 */
+.cherry-previewer-monospace .cherry-code-block {
+  font-family: 'Fira Code', 'Source Code Pro', 'Consolas', 'Monaco', 'Courier New', monospace !important;
+}
+
+.cherry-previewer-monospace .cherry-code-block-content {
+  font-family: 'Fira Code', 'Source Code Pro', 'Consolas', 'Monaco', 'Courier New', monospace !important;
+}
+
+/* 代码块内的所有元素 */
+.cherry-previewer-monospace .cherry-code-block * {
+  font-family: inherit !important;
 }
 </style>

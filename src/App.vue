@@ -4,7 +4,7 @@ import { readTextFile, writeTextFile, writeFile, watch as watchFile } from '@tau
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { tabs, activeTabId, closeTab, setActiveTab, updateTabContent, markTabSaved, addRecentFile } from './stores/tabStore';
+import { tabs, activeTabId, closeTab, closeLeftTabs, closeRightTabs, closeAllTabs, setActiveTab, updateTabContent, markTabSaved, addRecentFile } from './stores/tabStore';
 import TabBar from './components/TabBar.vue';
 import Toolbar from './components/Toolbar.vue';
 import CherryEditor from './components/CherryEditor.vue';
@@ -13,6 +13,7 @@ import FileReloadDialog from './components/FileReloadDialog.vue';
 import UnsavedChangesDialog, { type UserChoice } from './components/UnsavedChangesDialog.vue';
 import ExportFormatDialog, { type ExportFormat } from './components/ExportFormatDialog.vue';
 import LoadingDialog from './components/LoadingDialog.vue';
+import ConfirmDialog, { type ConfirmChoice } from './components/ConfirmDialog.vue';
 import { useFileOpener } from './composables/useFileOpener';
 
 // 文件监视相关常量
@@ -50,6 +51,10 @@ const showExportFormatDialog = ref(false);
 // 加载对话框状态
 const showLoadingDialog = ref(false);
 const loadingMessage = ref('');
+
+// 关闭所有标签确认对话框状态
+const showCloseAllConfirmDialog = ref(false);
+const closeAllConfirmMessage = ref('');
 
 // Cherry Editor 组件引用
 const cherryEditorRef = ref<InstanceType<typeof CherryEditor> | null>(null);
@@ -213,7 +218,7 @@ onMounted(async () => {
 
   // 添加键盘事件监听
   window.addEventListener('keydown', handleKeyDown);
-  
+
   // 添加最近文件事件监听
   window.addEventListener('open-recent-file', handleOpenRecentFile);
 });
@@ -605,6 +610,38 @@ function handleSelectTab(id: string) {
   setActiveTab(id);
 }
 
+// 批量关闭标签页
+function handleCloseLeftTabs(id: string) {
+  closeLeftTabs(id);
+}
+
+function handleCloseRightTabs(id: string) {
+  closeRightTabs(id);
+}
+
+function handleCloseAllTabs() {
+  // 检查是否有 dirty 标签页
+  const dirtyTabs = tabs.filter(t => t.isDirty);
+  const dirtyCount = dirtyTabs.length;
+
+  if (dirtyCount > 0) {
+    closeAllConfirmMessage.value = `确定要关闭所有标签页吗？\n\n注意：有 ${dirtyCount} 个文件包含未保存的修改，这些修改将会丢失。`;
+  } else {
+    closeAllConfirmMessage.value = '确定要关闭所有标签页吗？';
+  }
+
+  // 显示确认对话框
+  showCloseAllConfirmDialog.value = true;
+}
+
+// 处理关闭所有标签确认对话框的选择
+function handleCloseAllConfirmChoice(choice: ConfirmChoice) {
+  if (choice === 'confirm') {
+    closeAllTabs();
+  }
+  showCloseAllConfirmDialog.value = false;
+}
+
 function handleContentChange(content: string) {
   if (activeTabId.value) {
     console.log('[App] handleContentChange called for tab:', activeTabId.value, 'content length:', content.length);
@@ -830,6 +867,17 @@ watch(
 
 // 处理全局键盘快捷键
 const handleKeyDown = (event: KeyboardEvent) => {
+  // 禁用刷新快捷键：F5, Ctrl+R, Ctrl+Shift+R, Command+R (Mac), Command+Shift+R (Mac)
+  if (
+    event.key === 'F5' ||
+    (event.key === 'r' || event.key === 'R') && (event.ctrlKey || event.metaKey)
+  ) {
+    console.log('[App] 阻止刷新快捷键:', event.key);
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+
   // Ctrl+O 或 Cmd+O (Mac) 打开文件
   if ((event.ctrlKey || event.metaKey) && event.key === 'o') {
     event.preventDefault();
@@ -880,6 +928,9 @@ onBeforeUnmount(() => {
       :active-tab-id="activeTabId"
       @close="handleCloseTab"
       @select="handleSelectTab"
+      @close-left="handleCloseLeftTabs"
+      @close-right="handleCloseRightTabs"
+      @close-all="handleCloseAllTabs"
     />
     <div class="editor-container">
       <CherryEditor
@@ -913,6 +964,14 @@ onBeforeUnmount(() => {
       :visible="showUnsavedChangesDialog"
       :file-name="pendingCloseFileName"
       @choice="handleUnsavedChangesChoice"
+    />
+    <ConfirmDialog
+      :visible="showCloseAllConfirmDialog"
+      title="关闭所有标签页"
+      :message="closeAllConfirmMessage"
+      confirm-text="确定"
+      cancel-text="取消"
+      @choice="handleCloseAllConfirmChoice"
     />
   </div>
 </template>
@@ -986,73 +1045,9 @@ html.dark .empty-state .hint {
   color: #6a6a6a;
 }
 
-/* Mermaid 暗色主题 - 使用更强的选择器 */
-html.dark svg[id^="mermaid-"],
-html.dark div[data-mermaid-theme],
-html.dark .cherry-markdown svg[id^="mermaid-"],
-html.dark .cherry-previewer svg[id^="mermaid-"] {
-  background-color: transparent !important;
-}
-
-/* Mermaid SVG 内部元素 - 修复节点填充色 */
-html.dark svg[id^="mermaid-"] .node rect,
-html.dark svg[id^="mermaid-"] .node circle,
-html.dark svg[id^="mermaid-"] .node ellipse,
-html.dark svg[id^="mermaid-"] .node polygon,
-html.dark svg[id^="mermaid-"] .node path,
-html.dark svg[id^="mermaid-"] rect.actor {
-  fill: #2d3748 !important;
-  stroke: #8a8a8a !important;
-  stroke-width: 2px !important;
-}
-
-html.dark svg[id^="mermaid-"] .label,
-html.dark svg[id^="mermaid-"] text,
-html.dark svg[id^="mermaid-"] tspan,
-html.dark svg[id^="mermaid-"] .nodeLabel,
-html.dark svg[id^="mermaid-"] .edgeLabel {
-  fill: #e0e0e0 !important;
-  color: #e0e0e0 !important;
-}
-
-/* 修复 edgeLabel 的背景色 */
-html.dark svg[id^="mermaid-"] .edgeLabel,
-html.dark svg[id^="mermaid-"] foreignObject .edgeLabel {
-  background-color: #2d3748 !important;
-}
-
-html.dark svg[id^="mermaid-"] .edgeLabel span {
-  background-color: #2d3748 !important;
-  color: #e0e0e0 !important;
-}
-
-html.dark svg[id^="mermaid-"] .edgePath path,
-html.dark svg[id^="mermaid-"] path.path,
-html.dark svg[id^="mermaid-"] line {
-  stroke: #8a8a8a !important;
-  stroke-width: 2px !important;
-}
-
-html.dark svg[id^="mermaid-"] marker path {
-  fill: #8a8a8a !important;
-  stroke: #8a8a8a !important;
-}
-
-html.dark svg[id^="mermaid-"] .cluster rect {
-  fill: #1a202c !important;
-  stroke: #6a6a6a !important;
-}
-
-/* 如果以上都不行，使用全局 SVG 反转（作为后备方案） */
-html.dark .cherry-markdown pre[data-language="mermaid"],
-html.dark .cherry-markdown code.language-mermaid {
-  filter: invert(0.9) hue-rotate(180deg) !important;
-}
-
-html.dark .cherry-markdown pre[data-language="mermaid"] svg,
-html.dark .cherry-markdown code.language-mermaid svg {
-  filter: invert(0.9) hue-rotate(180deg) !important;
-}
+/* Mermaid 11.12.2 原生支持暗色主题，无需 CSS Hack */
+/* 主题通过 mermaidConfig.theme: 'dark' 配置 */
+/* 参考：CherryEditor.vue 中的 mermaidConfig 配置 */
 
 /* 强制在预览模式下显示侧边栏 */
 .cherry.cherry--no-toolbar .cherry-sidebar {

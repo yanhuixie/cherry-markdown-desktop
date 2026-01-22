@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import { useTheme } from '../composables/useTheme';
 import { useFontSize } from '../composables/useFontSize';
+import { useFontFamily } from '../composables/useFontFamily';
 import { recentFiles } from '../stores/tabStore';
 
 defineEmits<{
@@ -15,29 +16,36 @@ defineEmits<{
 
 const { isDark, toggleTheme } = useTheme();
 const { currentFontSize, setFontSize, FONT_SIZE_CONFIGS } = useFontSize();
+const { isMonospace, setFontFamily, initFontFamily } = useFontFamily();
 
 // 最近文件下拉菜单状态
 const showRecentMenu = ref(false);
 const recentMenuButton = ref<HTMLButtonElement | null>(null);
 
-// 字号下拉菜单状态
-const showFontSizeMenu = ref(false);
-const fontSizeMenuButton = ref<HTMLButtonElement | null>(null);
+// 字体设置面板状态
+const showFontPanel = ref(false);
+const fontPanelButton = ref<HTMLButtonElement | null>(null);
 
 // 切换最近文件菜单
 function toggleRecentMenu() {
   showRecentMenu.value = !showRecentMenu.value;
 }
 
-// 切换字号菜单
-function toggleFontSizeMenu() {
-  showFontSizeMenu.value = !showFontSizeMenu.value;
+// 切换字体设置面板
+function toggleFontPanel() {
+  showFontPanel.value = !showFontPanel.value;
 }
 
 // 选择字号
 function selectFontSize(level: 'medium' | 'large' | 'xlarge') {
   setFontSize(level);
-  showFontSizeMenu.value = false;
+  showFontPanel.value = false;
+}
+
+// 选择字体类型
+function selectFontFamily(type: 'sansSerif' | 'monospace') {
+  setFontFamily(type);
+  showFontPanel.value = false;
 }
 
 // 点击最近文件打开
@@ -64,13 +72,14 @@ function handleClickOutside(event: MouseEvent) {
   if (recentMenuButton.value && !recentMenuButton.value.contains(event.target as Node)) {
     showRecentMenu.value = false;
   }
-  if (fontSizeMenuButton.value && !fontSizeMenuButton.value.contains(event.target as Node)) {
-    showFontSizeMenu.value = false;
+  if (fontPanelButton.value && !fontPanelButton.value.contains(event.target as Node)) {
+    showFontPanel.value = false;
   }
 }
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside);
+  initFontFamily();
 });
 
 onUnmounted(() => {
@@ -79,7 +88,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="toolbar">
+  <div class="toolbar" @contextmenu.prevent>
     <button class="toolbar-btn" @click="$emit('open')">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
@@ -173,39 +182,66 @@ onUnmounted(() => {
       {{ isDark ? '暗色' : '亮色' }}
     </button>
 
-    <!-- 字号选择按钮 -->
-    <div class="font-size-menu-container">
+    <!-- 字体设置按钮 -->
+    <div class="font-panel-container">
       <button
-        ref="fontSizeMenuButton"
+        ref="fontPanelButton"
         class="toolbar-btn"
-        @click="toggleFontSizeMenu"
-        :class="{ 'active': showFontSizeMenu }"
+        @click="toggleFontPanel"
+        :class="{ 'active': showFontPanel }"
       >
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M4 7V4h16v3" />
           <path d="M9 20h6" />
           <path d="M12 4v16" />
         </svg>
-        字号
+        字体
       </button>
 
-      <!-- 字号下拉菜单 -->
-      <div v-if="showFontSizeMenu" class="font-size-dropdown">
-        <div class="font-size-title">选择字号</div>
-        <div class="font-size-options">
-          <button
-            v-for="(config, key) in FONT_SIZE_CONFIGS"
-            :key="key"
-            class="font-size-option"
-            :class="{ 'selected': currentFontSize === key }"
-            @click="selectFontSize(key as 'medium' | 'large' | 'xlarge')"
-          >
-            <span class="font-size-label">{{ config.label }}</span>
-            <span class="font-size-preview" :style="{ fontSize: config.sizes.md }">A</span>
-          </button>
+      <!-- 字体设置面板 -->
+      <div v-if="showFontPanel" class="font-panel">
+        <!-- 字号选择区 -->
+        <div class="font-section">
+          <div class="section-title">字号</div>
+          <div class="size-options">
+            <button
+              v-for="(config, key) in FONT_SIZE_CONFIGS"
+              :key="key"
+              class="option-btn"
+              :class="{ 'selected': currentFontSize === key }"
+              @click="selectFontSize(key as 'medium' | 'large' | 'xlarge')"
+            >
+              <span class="option-label">{{ config.label }}</span>
+              <span class="option-preview" :style="{ fontSize: config.sizes.md }">A</span>
+            </button>
+          </div>
+        </div>
+        
+        <div class="section-divider"></div>
+        
+        <!-- 字体类型切换区 -->
+        <div class="font-section">
+          <div class="section-title">字体</div>
+          <div class="family-options">
+            <button
+              class="option-btn"
+              :class="{ 'selected': !isMonospace }"
+              @click="selectFontFamily('sansSerif')"
+            >
+              常规
+            </button>
+            <button
+              class="option-btn"
+              :class="{ 'selected': isMonospace }"
+              @click="selectFontFamily('monospace')"
+            >
+              等宽
+            </button>
+          </div>
         </div>
       </div>
     </div>
+    
     <button class="toolbar-btn" @click="$emit('about')">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="12" cy="12" r="10" />
@@ -321,70 +357,92 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-/* 字号菜单容器 */
-.font-size-menu-container {
+/* 字体设置面板容器 */
+.font-panel-container {
   position: relative;
 }
 
-/* 字号下拉菜单 */
-.font-size-dropdown {
+/* 字体设置面板 */
+.font-panel {
   position: absolute;
   top: 100%;
   left: 0;
   margin-top: 4px;
-  min-width: 200px;
+  min-width: 280px;
   background-color: #fff;
-  border: 1px solid #ddd;
-  border-radius: 6px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   z-index: 1000;
   overflow: hidden;
+  padding: 12px;
 }
 
-.font-size-title {
-  padding: 10px 12px 8px;
+.font-section {
+  padding: 4px 0;
+}
+
+.section-title {
   font-size: 12px;
   font-weight: 600;
   color: #666;
-  border-bottom: 1px solid #eee;
+  margin-bottom: 8px;
 }
 
-.font-size-options {
+.section-divider {
+  height: 1px;
+  background-color: #e5e7eb;
+  margin: 8px 0;
+}
+
+.size-options, .family-options {
   display: flex;
-  flex-direction: column;
-  padding: 4px;
+  gap: 8px;
 }
 
-.font-size-option {
+.option-btn {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
+  gap: 8px;
   padding: 10px 12px;
-  background: none;
-  border: none;
-  border-radius: 4px;
+  min-width: 70px;
+  background-color: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
   cursor: pointer;
-  transition: background-color 0.15s;
+  transition: all 0.15s;
+  flex: 1;
 }
 
-.font-size-option:hover {
-  background-color: #f0f0f0;
+.option-btn:hover {
+  background-color: #f9fafb;
+  border-color: #d1d5db;
 }
 
-.font-size-option.selected {
-  background-color: #e8f4fd;
-  font-weight: 600;
+.option-btn.selected {
+  background-color: #f0f7ff;
+  border-color: #1890ff;
 }
 
-.font-size-label {
+.option-label {
   font-size: 13px;
   color: #333;
+  white-space: nowrap;
 }
 
-.font-size-preview {
-  font-size: 16px;
+.option-preview {
+  font-size: 14px;
   color: #666;
   font-weight: bold;
+}
+
+.option-btn.selected .option-label {
+  color: #1890ff;
+}
+
+.option-btn.selected .option-preview {
+  color: #1890ff;
 }
 
 /* 暗色主题 */
@@ -434,29 +492,49 @@ html.dark .recent-file-path {
   color: #888;
 }
 
-html.dark .font-size-dropdown {
-  background-color: #3c3c3c;
+html.dark .font-panel {
+  background-color: #2d2d2d;
   border-color: #4a4a4a;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
 }
 
-html.dark .font-size-title {
+html.dark .section-title {
   color: #999;
-  border-bottom-color: #4a4a4a;
 }
 
-html.dark .font-size-option:hover {
-  background-color: #4a4a4a;
+html.dark .section-divider {
+  background-color: #3e3e3e;
 }
 
-html.dark .font-size-option.selected {
-  background-color: #1e4d6b;
-}
-
-html.dark .font-size-label {
+html.dark .option-btn {
+  background-color: #2d2d2d;
+  border-color: #4a4a4a;
   color: #d4d4d4;
 }
 
-html.dark .font-size-preview {
+html.dark .option-btn:hover {
+  background-color: #3e3e3e;
+  border-color: #5a5a5a;
+}
+
+html.dark .option-btn.selected {
+  background-color: #1e3a5f;
+  border-color: #1890ff;
+}
+
+html.dark .option-label {
+  color: #d4d4d4;
+}
+
+html.dark .option-preview {
   color: #999;
+}
+
+html.dark .option-btn.selected .option-label {
+  color: #66b8ff;
+}
+
+html.dark .option-btn.selected .option-preview {
+  color: #66b8ff;
 }
 </style>

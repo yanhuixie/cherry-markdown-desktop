@@ -11,7 +11,6 @@
   },
   "dependencies": {
     "@md2docx/md2docx": "^0.0.1",
-    "@md2docx/mermaid": "^1.2.2",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.4.2",
     "@tauri-apps/plugin-fs": "^2.4.4",
@@ -19,13 +18,14 @@
     "cherry-markdown": "^0.10.3",
     "echarts": "^6.0.0",
     "html2canvas": "^1.4.1",
+    "mermaid": "11.12.2",
     "vue": "^3.5.13"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
-    "@vitejs/plugin-vue": "^5.2.1",
+    "@vitejs/plugin-vue": "^6.0.3",
     "typescript": "~5.6.2",
-    "vite": "^6.0.3",
+    "vite": "^7.3.1",
     "vue-tsc": "^2.1.10"
   }
 }

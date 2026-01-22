@@ -107,6 +107,12 @@ fn get_pending_file(state: State<AppState>) -> Option<String> {
 }
 
 #[tauri::command]
+fn log_frontend(message: String) {
+    // 将前端日志写入到同一个日志文件
+    log::info!("[FRONTEND] {}", message);
+}
+
+#[tauri::command]
 fn greet(name: &str) -> String {
     log::info!("greet called with name: {}", name);
     format!("Hello, {}! You've been greeted from Rust!", name)
@@ -219,7 +225,7 @@ pub fn run() {
             log::info!("Application setup completed");
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_pending_file, greet])
+        .invoke_handler(tauri::generate_handler![get_pending_file, greet, log_frontend])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
