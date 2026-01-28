@@ -15,6 +15,7 @@ import ExportFormatDialog, { type ExportFormat } from './components/ExportFormat
 import LoadingDialog from './components/LoadingDialog.vue';
 import ConfirmDialog, { type ConfirmChoice } from './components/ConfirmDialog.vue';
 import { useFileOpener } from './composables/useFileOpener';
+import { resolvePath } from './utils/pathUtils';
 
 // 文件监视相关常量
 const FILE_WATCH_DEBOUNCE_MS = 500; // 文件监视的防抖延迟（毫秒）
@@ -651,41 +652,6 @@ function handleContentChange(content: string) {
 
 function isMarkdownLink(href: string): boolean {
   return href.endsWith('.md') || href.endsWith('.markdown');
-}
-
-/**
- * 解析相对路径，正确处理 . 和 ..
- * @param fromPath 基准路径（绝对路径）
- * @param relativePath 相对路径
- * @returns 解析后的绝对路径
- */
-function resolvePath(fromPath: string, relativePath: string): string {
-  // 检测原始路径分隔符
-  const isWindowsPath = /^[A-Za-z]:/.test(fromPath);
-  const separator = isWindowsPath ? '\\' : '/';
-
-  // 将路径统一转换为 / 格式进行解析
-  const normalizedFrom = fromPath.replace(/\\/g, '/');
-  const normalizedRelative = relativePath.replace(/\\/g, '/');
-
-  // 提取基准目录
-  const baseDir = normalizedFrom.substring(0, normalizedFrom.lastIndexOf('/'));
-
-  // 使用 URL 解析相对路径
-  const resolvedUrl = new URL(normalizedRelative, `file://${baseDir}/`);
-  let resolvedPath = resolvedUrl.pathname;
-
-  // Windows 路径处理：移除开头的 /
-  if (isWindowsPath) {
-    resolvedPath = resolvedPath.substring(1);
-  }
-
-  // 恢复原始路径分隔符（Windows 使用 \）
-  if (separator === '\\') {
-    resolvedPath = resolvedPath.replace(/\//g, '\\');
-  }
-
-  return resolvedPath;
 }
 
 async function handleClickLink(href: string) {

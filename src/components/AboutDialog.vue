@@ -42,10 +42,11 @@ const emit = defineEmits<{
               </p>
             </div>
 
-            <div class="about-section qrcode-section">
+            <!-- <div class="about-section qrcode-section">
               <p class="qrcode-title">欢迎关注微信公众号</p>
               <img src="/wechat-mp.jpg" alt="微信公众号二维码" class="qrcode-img" />
-            </div>
+            </div> -->
+            <br/>
           </div>
         </div>
       </div>

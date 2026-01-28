@@ -2,42 +2,17 @@
 import { onMounted, ref, watch, onBeforeUnmount } from 'vue';
 // 使用 cherry-markdown core 版本（不包含内置 mermaid）
 import Cherry from 'cherry-markdown/dist/cherry-markdown.core.js';
+import { convertFileSrc } from '@tauri-apps/api/core';
+import { readFile } from '@tauri-apps/plugin-fs';
 import { type TabItem, updateTabEditorMode } from '../stores/tabStore';
 import { useTheme } from '../composables/useTheme';
 import { useFontSize, type FontSizeLevel } from '../composables/useFontSize';
 import { useFontFamily } from '../composables/useFontFamily';
 import type { ExportFormat } from './ExportFormatDialog.vue';
+import { resolvePath } from '../utils/pathUtils';
 
-// 异步加载 mermaid 和 mermaid 插件
-// 按照 Cherry Markdown 官方 wiki 方式三：https://tencent.github.io/cherry-markdown/examples/mermaid.html
-const initMermaidPlugin = async () => {
-  try {
-    // 动态导入 mermaid 11.12.2
-    const mermaidModule = await import('mermaid');
-    const mermaid = (mermaidModule as any).default || mermaidModule;
-
-    // 动态导入 Cherry Markdown 的 mermaid 插件
-    const MermaidCodeEngineModule = await import('cherry-markdown/dist/addons/cherry-code-block-mermaid-plugin.js');
-    const MermaidCodeEngine = (MermaidCodeEngineModule as any).default || MermaidCodeEngineModule;
-
-    // 注册 mermaid 插件到 Cherry
-    // 注意：mermaid v10+ 直接使用 mermaid 作为 API，不再有 mermaid.mermaidAPI
-    Cherry.usePlugin(MermaidCodeEngine, {
-      mermaid,
-      mermaidAPI: mermaid, // v10+ 直接使用 mermaid
-    });
-
-    console.log('[CherryEditor] Mermaid plugin registered successfully');
-    console.log('[CherryEditor] Mermaid loaded:', typeof mermaid);
-    return true;
-  } catch (error) {
-    console.error('[CherryEditor] Failed to load mermaid plugin:', error);
-    return false;
-  }
-};
-
-// 标记 mermaid 插件是否已初始化
-let mermaidPluginInitialized = false;
+// 注意：mermaid 插件已在 main.ts 中通过 initCherryPlugins() 预先注册
+// 不需要在此组件中再次注册，避免 "usePlugin should be called before Cherry is instantiated" 错误
 
 const props = defineProps<{
   tab: TabItem | null;
@@ -139,15 +114,7 @@ const initEditor = async () => {
   console.log('Initializing Cherry Editor with theme:', isDark.value ? 'dark' : 'light');
   console.log('themeSettings.mainTheme:', isDark.value ? 'abyss' : 'default');
 
-  // 初始化 mermaid 插件（如果还没初始化）
-  if (!mermaidPluginInitialized) {
-    const success = await initMermaidPlugin();
-    if (success) {
-      mermaidPluginInitialized = true;
-    } else {
-      console.warn('[CherryEditor] Mermaid plugin initialization failed, continuing without mermaid support');
-    }
-  }
+  // 注意：mermaid 插件已在 main.ts 启动时预先注册，无需在此等待
 
   // 清除可能的主题缓存
   try {
@@ -264,6 +231,38 @@ const initEditor = async () => {
       },
     },
     callback: {
+      urlProcessor: (url: string, srcType: string) => {
+        // 如果是 http/https/data 链接，直接返回
+        if (/^(https?:|data:)/.test(url)) {
+          return url;
+        }
+
+        // 获取当前文件路径
+        const currentFilePath = props.tab?.filePath;
+
+        // 如果是 untitled 文件（未保存），无法解析相对路径
+        if (!currentFilePath || currentFilePath.startsWith('untitled')) {
+          return url;
+        }
+
+        try {
+          // 解析相对路径为绝对路径（resolvePath 返回正斜杠格式）
+          const absolutePath = resolvePath(currentFilePath, url);
+
+          // 直接使用绝对路径，让 Tauri 的 convertFileSrc 处理
+          // 注意：不再移除 Windows 盘符，直接传入完整路径
+          const tauriUrl = convertFileSrc(absolutePath);
+
+          return tauriUrl;
+        } catch (error) {
+          console.error('[CherryEditor] Failed to resolve URL:', error, {
+            url,
+            srcType,
+            currentFilePath,
+          });
+          return url;
+        }
+      },
       onClickPreview: (e: MouseEvent) => {
         const target = e.target as HTMLElement;
         const anchor = target.closest('A');
@@ -512,6 +511,68 @@ watch(isMonospace, () => {
   updateFontFamily();
 });
 
+// 检查代码块是否超过10行
+const isCodeBlockOverLimit = (codeBlock: Element): boolean => {
+  // 方法1: 检查是否有折叠遮罩层（最准确）
+  const hasMask = codeBlock.querySelector('.cherry-mask-code-block');
+  if (hasMask) return true;
+
+  // 方法2: 检查行号数量
+  const lineNumbers = codeBlock.querySelectorAll('.cherry-code-block-line-numbers li');
+  if (lineNumbers.length > 0) {
+    return lineNumbers.length > 10;
+  }
+
+  // 方法3: 检查 code 元素的文本行数
+  const codeElement = codeBlock.querySelector('code');
+  if (codeElement) {
+    const lines = codeElement.textContent?.split('\n').length || 0;
+    return lines > 10;
+  }
+
+  // 默认不超过限制
+  return false;
+};
+
+// 处理代码块折叠/展开
+const handleToggleCodeBlock = (event: Event) => {
+  const customEvent = event as CustomEvent<{ expanded: boolean }>;
+  const expanded = customEvent.detail.expanded;
+  console.log('[CherryEditor] Toggle code blocks, expanded:', expanded);
+
+  const previewerDom = editorRef.value?.querySelector('.cherry-previewer') as HTMLElement;
+  if (!previewerDom) {
+    console.warn('[CherryEditor] Previewer not found');
+    return;
+  }
+
+  if (expanded) {
+    // 展开所有超过10行的代码块
+    const codeBlocks = previewerDom.querySelectorAll('.cherry-code-unExpand');
+    let expandedCount = 0;
+    codeBlocks.forEach(block => {
+      if (isCodeBlockOverLimit(block)) {
+        block.classList.remove('cherry-code-unExpand');
+        block.classList.add('cherry-code-expand');
+        expandedCount++;
+      }
+    });
+    console.log(`[CherryEditor] Expanded ${expandedCount} code blocks (skipped ${codeBlocks.length - expandedCount} small blocks)`);
+  } else {
+    // 折叠所有超过10行的代码块
+    const codeBlocks = previewerDom.querySelectorAll('.cherry-code-expand');
+    let collapsedCount = 0;
+    codeBlocks.forEach(block => {
+      if (isCodeBlockOverLimit(block)) {
+        block.classList.remove('cherry-code-expand');
+        block.classList.add('cherry-code-unExpand');
+        collapsedCount++;
+      }
+    });
+    console.log(`[CherryEditor] Collapsed ${collapsedCount} code blocks (skipped ${codeBlocks.length - collapsedCount} small blocks)`);
+  }
+};
+
 // 处理键盘快捷键
 const handleKeyDown = (event: KeyboardEvent) => {
   // Ctrl+S 或 Cmd+S (Mac) 保存
@@ -540,6 +601,8 @@ onMounted(async () => {
   window.addEventListener('font-size-changed', handleFontSizeChange);
   // 添加字体类型变化监听
   window.addEventListener('font-family-changed', handleFontFamilyChange);
+  // 添加代码块折叠/展开监听
+  window.addEventListener('toggle-code-block', handleToggleCodeBlock);
 });
 
 onBeforeUnmount(() => {
@@ -552,6 +615,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('font-size-changed', handleFontSizeChange);
   // 移除字体类型变化监听
   window.removeEventListener('font-family-changed', handleFontFamilyChange);
+  // 移除代码块折叠/展开监听
+  window.removeEventListener('toggle-code-block', handleToggleCodeBlock);
 });
 
 // 暴露获取内容的方法
@@ -789,34 +854,200 @@ const exportPNG = async (): Promise<{ blob: Blob; filename: string }> => {
   });
 };
 
+/**
+ * 将图片路径转换为 base64 data URL
+ * 支持相对路径和绝对路径
+ */
+const convertImageToBase64 = async (imagePath: string): Promise<string> => {
+  try {
+    // 如果已经是 data URL 或 http URL，直接返回
+    if (/^(data:|https?:)/.test(imagePath)) {
+      return imagePath;
+    }
+
+    // 获取当前文件路径
+    const currentFilePath = props.tab?.filePath;
+
+    // 如果是 untitled 文件（未保存），无法解析相对路径
+    if (!currentFilePath || currentFilePath.startsWith('untitled')) {
+      console.warn('[CherryEditor] Cannot resolve image path: no valid file path', { imagePath, currentFilePath });
+      return imagePath;
+    }
+
+    // 解析相对路径为绝对路径
+    const absolutePath = resolvePath(currentFilePath, imagePath);
+
+    // 读取图片文件为二进制数据
+    const imageBytes = await readFile(absolutePath);
+
+    // 转换为 base64
+    const base64 = arrayBufferToBase64(imageBytes);
+
+    // 根据文件扩展名确定 MIME 类型
+    const ext = absolutePath.split('.').pop()?.toLowerCase() || 'png';
+    const mimeTypes: Record<string, string> = {
+      'png': 'image/png',
+      'jpg': 'image/jpeg',
+      'jpeg': 'image/jpeg',
+      'gif': 'image/gif',
+      'svg': 'image/svg+xml',
+      'webp': 'image/webp',
+      'bmp': 'image/bmp',
+    };
+    const mimeType = mimeTypes[ext] || 'image/png';
+
+    // 返回 data URL
+    return `data:${mimeType};base64,${base64}`;
+  } catch (error) {
+    console.error('[CherryEditor] Failed to convert image to base64:', error, { imagePath });
+    // 失败时返回原始路径
+    return imagePath;
+  }
+};
+
+/**
+ * 将 Uint8Array 转换为 base64 字符串
+ */
+const arrayBufferToBase64 = (buffer: Uint8Array): string => {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return window.btoa(binary);
+};
+
+/**
+ * 预处理 Markdown 内容，将相对路径图片转换为 base64
+ */
+const preprocessMarkdownImages = async (markdown: string): Promise<string> => {
+  // 匹配 Markdown 图片语法：![alt](path) 或 ![alt](path "title")
+  const imageRegex = /!\[(.*?)\]\((.+?)(?:\s+"(.*?)")?\)/g;
+
+  const processedImages: Array<{ original: string; replacement: string }> = [];
+  let match;
+
+  // 收集所有图片
+  while ((match = imageRegex.exec(markdown)) !== null) {
+    const [fullMatch, _alt, imagePath, _title] = match;
+
+    // 跳过已经是 data URL 或 http URL 的图片
+    if (/^(data:|https?:)/.test(imagePath)) {
+      continue;
+    }
+
+    processedImages.push({
+      original: fullMatch,
+      replacement: fullMatch, // 稍后替换
+    });
+  }
+
+  // 如果没有相对路径图片，直接返回原始内容
+  if (processedImages.length === 0) {
+    return markdown;
+  }
+
+  console.log(`[CherryEditor] Found ${processedImages.length} local images, converting to base64...`);
+
+  // 转换所有图片为 base64
+  const conversions = await Promise.all(
+    processedImages.map(async (item) => {
+      const match = item.original.match(/!\[(.*?)\]\((.+?)(?:\s+"(.*?)")?\)/);
+      if (!match) return item;
+
+      const [, alt, imagePath, title] = match;
+      const base64Url = await convertImageToBase64(imagePath);
+
+      // 重建图片语法
+      let newImageSyntax = `![${alt}](${base64Url}`;
+      if (title) {
+        newImageSyntax += ` "${title}"`;
+      }
+      newImageSyntax += ')';
+
+      return { ...item, replacement: newImageSyntax };
+    })
+  );
+
+  // 替换所有图片
+  let result = markdown;
+  conversions.forEach(({ original, replacement }) => {
+    result = result.replace(original, replacement);
+  });
+
+  console.log('[CherryEditor] Image preprocessing completed');
+  return result;
+};
+
+/**
+ * 预处理 Markdown 中的 mermaid 代码块
+ * 修复格式问题，特别是 subgraph、C4 context 和 HTML 标签的兼容性
+ */
+const preprocessMermaidBlocks = (markdown: string): string => {
+  // 临时禁用所有预处理逻辑，直接返回原始内容
+  console.log('[CherryEditor] preprocessMermaidBlocks DISABLED - returning original markdown');
+  return markdown;
+};
+
 // 解析 Markdown 并导出为 Word 文档
 const exportDOCX = async (): Promise<{ blob: Blob; filename: string }> => {
   if (!cherryEditor) {
     throw new Error('Editor not initialized');
   }
 
-  // 动态导入 md2docx 库
-  const { md2docx } = await import('@md2docx/md2docx');
+  // 使用我们自己的 mdast2docx 模块
+  const { toDocx, mermaidPlugin, imagePlugin, htmlPlugin, listPlugin, mathPlugin, tablePlugin, emojiPlugin } = await import('../utils/mdast2docx');
+  const { fromMarkdown } = await import('mdast-util-from-markdown');
+  const { gfmTable } = await import('micromark-extension-gfm-table');
+  const { gfmTableFromMarkdown } = await import('mdast-util-gfm-table');
 
   // 获取 Markdown 内容
-  const markdown = cherryEditor.getMarkdown();
+  let markdown = cherryEditor.getMarkdown();
   const defaultFilename = props.tab?.fileName.replace(/\.(md|markdown)$/i, '') || 'document';
 
-  // 使用 md2docx 直接将 Markdown 转换为 DOCX
-  // 参数: markdown, docxProps, sectionProps, outputType, pluginProps
-  const blob = await md2docx(
-    markdown,
+  // 预处理：将相对路径图片转换为 base64
+  console.log('[CherryEditor] Preprocessing images for DOCX export...');
+  markdown = await preprocessMarkdownImages(markdown);
+
+  // 预处理：修复 mermaid 代码块
+  console.log('[CherryEditor] Preprocessing mermaid blocks for DOCX export...');
+  markdown = preprocessMermaidBlocks(markdown);
+
+  // 将 markdown 转换为 MDAST（支持 GFM 表格）
+  const mdast = fromMarkdown(markdown, {
+    extensions: [gfmTable()],
+    mdastExtensions: [gfmTableFromMarkdown()],
+  });
+
+  // 调试：打印 MDAST 结构（仅打印前1000行避免日志过长）
+  // console.log('[CherryEditor] MDAST 结构（前1000行）:', JSON.stringify(mdast, null, 2).slice(0, 5000));
+
+  // 调试：查找表格节点
+  const tableNodes = mdast.children.filter((node: any) => node.type === 'table');
+  console.log('[CherryEditor] 找到', tableNodes.length, '个表格节点');
+
+  // 配置插件
+  const plugins = [
+    mermaidPlugin(),  // Mermaid 图表支持
+    imagePlugin(),    // 图片支持
+    htmlPlugin(),     // HTML 转换
+    listPlugin(),     // 列表转换
+    mathPlugin(),     // 数学公式
+    tablePlugin(),    // 表格支持
+    emojiPlugin(),    // Emoji 支持
+  ];
+
+  console.log('[CherryEditor] 配置的插件数量:', plugins.length);
+  console.log('[CherryEditor] 插件列表:', plugins.map(p => p?.name || typeof p));
+
+  // 使用 md2docx 将 MDAST 转换为 DOCX
+  // 参数: mdast, docxProps, sectionProps, outputType
+  const blob = await toDocx(
+    mdast,
     undefined,  // docxProps (使用默认)
-    undefined,  // sectionProps (使用默认)
-    undefined,  // outputType (默认 "blob")
-    {
-      // pluginProps - 配置各种插件选项
-      mermaid: {
-        mermaidConfig: {
-          theme: isDark.value ? 'dark' : 'default',
-        },
-      },
-    }
+    { plugins },  // sectionProps - 传递插件数组
+    undefined   // outputType (默认 "blob")
   ) as Blob;
 
   return { blob, filename: defaultFilename };
@@ -889,5 +1120,11 @@ defineExpose({ getContent, toggleMode, exportContent, getExportContent, exportPN
 /* 代码块内的所有元素 */
 .cherry-previewer-monospace .cherry-code-block * {
   font-family: inherit !important;
+}
+
+/* 预览区域图片自适应宽度 */
+.cherry-previewer img {
+  max-width: 85%;
+  height: auto;
 }
 </style>

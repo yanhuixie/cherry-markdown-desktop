@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted } from 'vue';
 import { useTheme } from '../composables/useTheme';
 import { useFontSize } from '../composables/useFontSize';
 import { useFontFamily } from '../composables/useFontFamily';
+import { useCodeBlock } from '../composables/useCodeBlock';
 import { recentFiles } from '../stores/tabStore';
 
 defineEmits<{
@@ -17,6 +18,7 @@ defineEmits<{
 const { isDark, toggleTheme } = useTheme();
 const { currentFontSize, setFontSize, FONT_SIZE_CONFIGS } = useFontSize();
 const { isMonospace, setFontFamily, initFontFamily } = useFontFamily();
+const { allCodeExpanded, toggleCodeBlock } = useCodeBlock();
 
 // 最近文件下拉菜单状态
 const showRecentMenu = ref(false);
@@ -164,6 +166,20 @@ onUnmounted(() => {
       </svg>
       编辑/预览
     </button>
+
+    <!-- 代码块折叠/展开按钮 -->
+    <button class="toolbar-btn" @click="toggleCodeBlock">
+      <svg v-if="!allCodeExpanded" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="13 17 18 12 13 7" />
+        <polyline points="6 17 11 12 6 7" />
+      </svg>
+      <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="11 17 6 12 11 7" />
+        <polyline points="18 17 13 12 18 7" />
+      </svg>
+      {{ allCodeExpanded ? '折叠代码' : '展开代码' }}
+    </button>
+
     <button class="toolbar-btn" @click="toggleTheme">
       <svg v-if="!isDark" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="12" cy="12" r="5" />
@@ -241,7 +257,7 @@ onUnmounted(() => {
         </div>
       </div>
     </div>
-    
+
     <button class="toolbar-btn" @click="$emit('about')">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="12" cy="12" r="10" />

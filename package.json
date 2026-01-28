@@ -10,22 +10,38 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@md2docx/md2docx": "^0.0.1",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.4.2",
     "@tauri-apps/plugin-fs": "^2.4.4",
     "@tauri-apps/plugin-opener": "^2",
+    "@types/mdast": "^4.0.4",
     "cherry-markdown": "^0.10.3",
+    "docx": "^9.5.1",
     "echarts": "^6.0.0",
     "html2canvas": "^1.4.1",
+    "mdast-util-from-markdown": "^2.0.2",
+    "mdast-util-gfm-table": "^2.0.0",
     "mermaid": "11.12.2",
+    "micromark-extension-gfm-table": "^2.1.1",
+    "remark-frontmatter": "^5.0.0",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "remark-parse": "^11.0.0",
+    "unified": "^11.0.5",
     "vue": "^3.5.13"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
+    "@types/node-fetch": "^2.6.13",
+    "@unified-latex/unified-latex-types": "^1.8.0",
     "@vitejs/plugin-vue": "^6.0.3",
+    "@xmldom/xmldom": "^0.8.11",
+    "latex-math": "^0.0.2",
+    "mdast": "^3.0.0",
+    "sharp": "^0.34.5",
     "typescript": "~5.6.2",
     "vite": "^7.3.1",
-    "vue-tsc": "^2.1.10"
+    "vue-tsc": "^2.1.10",
+    "xxhash-wasm": "^1.1.0"
   }
 }
