@@ -1,10 +1,11 @@
 <script setup lang="ts">
-defineProps<{
+const props = defineProps<{
   visible: boolean;
   x: number;
   y: number;
   tabIndex: number;
   totalTabs: number;
+  filePath: string;
 }>();
 
 const emit = defineEmits<{
@@ -12,7 +13,34 @@ const emit = defineEmits<{
   (e: 'close-left'): void;
   (e: 'close-right'): void;
   (e: 'close-all'): void;
+  (e: 'close-menu'): void;
 }>();
+
+// 从文件路径中提取文件名
+const getFileName = (path: string): string => {
+  const parts = path.split(/[/\\]/);
+  return parts[parts.length - 1] || path;
+};
+
+// 复制文件名到剪贴板
+const copyFileName = async () => {
+  try {
+    await navigator.clipboard.writeText(getFileName(props.filePath));
+  } catch (err) {
+    console.error('复制文件名失败:', err);
+  }
+  emit('close-menu');
+};
+
+// 复制文件路径到剪贴板
+const copyFilePath = async () => {
+  try {
+    await navigator.clipboard.writeText(props.filePath);
+  } catch (err) {
+    console.error('复制文件路径失败:', err);
+  }
+  emit('close-menu');
+};
 </script>
 
 <template>
@@ -42,6 +70,12 @@ const emit = defineEmits<{
       </div>
       <div class="menu-item" @click="emit('close-all')">
         关闭所有标签页
+      </div>
+      <div class="menu-item" @click="copyFileName">
+        复制文件名
+      </div>
+      <div class="menu-item" @click="copyFilePath">
+        复制文件路径
       </div>
     </div>
   </Teleport>

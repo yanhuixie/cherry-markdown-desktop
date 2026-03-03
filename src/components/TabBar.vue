@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onUnmounted } from 'vue';
 import type { TabItem } from '../stores/tabStore';
+import { getSyncStatusIcon, getSyncStatusText, isExternallyModified, isConflict } from '../stores/fileSyncStatus';
 import TabContextMenu from './TabContextMenu.vue';
 
 const props = defineProps<{
@@ -22,6 +23,7 @@ const contextMenu = ref({
   x: 0,
   y: 0,
   tabIndex: -1,
+  filePath: '',
 });
 
 const closeTabHandler = (e: MouseEvent, id: string) => {
@@ -29,8 +31,28 @@ const closeTabHandler = (e: MouseEvent, id: string) => {
   emit('close', id);
 };
 
+// 获取状态图标
+const getStatusIcon = (tab: TabItem): string => {
+  return getSyncStatusIcon(tab.syncStatus);
+};
+
+// 获取状态文本（用于工具提示）
+const getStatusText = (tab: TabItem): string => {
+  return getSyncStatusText(tab.syncStatus);
+};
+
+// 判断是否为外部修改或冲突状态
+const isExternallyModifiedTab = (tab: TabItem): boolean => {
+  return isExternallyModified(tab.syncStatus);
+};
+
+// 判断是否为冲突状态
+const isConflictTab = (tab: TabItem): boolean => {
+  return isConflict(tab.syncStatus);
+};
+
 // 右键点击处理
-const handleRightClick = (e: MouseEvent, _tab: TabItem, tabIndex: number) => {
+const handleRightClick = (e: MouseEvent, tab: TabItem, tabIndex: number) => {
   e.preventDefault();
   e.stopPropagation();
 
@@ -45,6 +67,7 @@ const handleRightClick = (e: MouseEvent, _tab: TabItem, tabIndex: number) => {
     x: e.clientX,
     y: e.clientY,
     tabIndex,
+    filePath: tab.filePath,
   };
 
   // 延迟添加全局点击监听，避免立即触发
@@ -109,14 +132,17 @@ onUnmounted(() => {
       v-for="(tab, index) in tabs"
       :key="tab.id"
       class="tab"
-      :class="{ active: tab.id === activeTabId }"
+      :class="{
+        active: tab.id === activeTabId,
+        'tab-externally-modified': isExternallyModifiedTab(tab),
+        'tab-conflict': isConflictTab(tab)
+      }"
+      :title="`${tab.filePath} - ${getStatusText(tab)}`"
       @click="emit('select', tab.id)"
       @contextmenu="handleRightClick($event, tab, index)"
     >
-      <span class="tab-name">
-        {{ tab.fileName }}
-        <span v-if="tab.isDirty" class="dirty-mark">*</span>
-      </span>
+      <span class="tab-status-icon" v-if="getStatusIcon(tab)">{{ getStatusIcon(tab) }}</span>
+      <span class="tab-name">{{ tab.fileName }}</span>
       <button class="close-btn" @click="closeTabHandler($event, tab.id)">×</button>
     </div>
   </div>
@@ -127,10 +153,12 @@ onUnmounted(() => {
     :y="contextMenu.y"
     :tab-index="contextMenu.tabIndex"
     :total-tabs="tabs.length"
+    :file-path="contextMenu.filePath"
     @close="handleClose"
     @close-left="handleCloseLeft"
     @close-right="handleCloseRight"
     @close-all="handleCloseAll"
+    @close-menu="hideContextMenu"
   />
 </template>
 
@@ -138,14 +166,15 @@ onUnmounted(() => {
 .tab-bar {
   display: flex;
   background-color: #f0f0f0;
-  border-bottom: 1px solid #ddd;
   overflow-x: auto;
 }
 
 .tab {
   display: flex;
   align-items: center;
-  padding: 8px 12px;
+  padding: 0 12px;
+  height: 36px;
+  box-sizing: border-box;
   cursor: pointer;
   border-right: 1px solid #ddd;
   min-width: 100px;
@@ -161,6 +190,21 @@ onUnmounted(() => {
   border-bottom: 2px solid #396cd8;
 }
 
+.tab-status-icon {
+  margin-right: 4px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.tab-externally-modified {
+  border-bottom: 2px solid #2196f3;
+}
+
+.tab-conflict {
+  border-bottom: 2px solid #f44336;
+  background-color: #fff5f5;
+}
+
 .tab-name {
   font-size: 13px;
   color: #333;
@@ -168,11 +212,6 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.dirty-mark {
-  color: #ff6b6b;
-  margin-left: 2px;
 }
 
 .close-btn {
@@ -193,7 +232,6 @@ onUnmounted(() => {
 /* 暗色主题 */
 html.dark .tab-bar {
   background-color: #252526;
-  border-bottom-color: #3e3e3e;
 }
 
 html.dark .tab {
@@ -207,6 +245,15 @@ html.dark .tab:hover {
 html.dark .tab.active {
   background-color: #1e1e1e;
   border-bottom-color: #396cd8;
+}
+
+html.dark .tab-externally-modified {
+  border-bottom-color: #2196f3;
+}
+
+html.dark .tab-conflict {
+  background-color: #2d1b1b;
+  border-bottom-color: #f44336;
 }
 
 html.dark .tab-name {

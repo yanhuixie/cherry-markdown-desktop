@@ -4,11 +4,14 @@ import { useTheme } from '../composables/useTheme';
 import { useFontSize } from '../composables/useFontSize';
 import { useFontFamily } from '../composables/useFontFamily';
 import { useCodeBlock } from '../composables/useCodeBlock';
-import { recentFiles } from '../stores/tabStore';
+import { recentFiles, removeRecentFile } from '../stores/tabStore';
+import RecentFileErrorDialog from './RecentFileErrorDialog.vue';
+import type { RecentFileErrorChoice } from './RecentFileErrorDialog.vue';
 
-defineEmits<{
+const emit = defineEmits<{
   (e: 'new'): void;
   (e: 'open'): void;
+  (e: 'open-folder'): void;
   (e: 'save'): void;
   (e: 'save-as'): void;
   (e: 'toggle-mode'): void;
@@ -24,6 +27,10 @@ const { allCodeExpanded, toggleCodeBlock } = useCodeBlock();
 const showRecentMenu = ref(false);
 const recentMenuButton = ref<HTMLButtonElement | null>(null);
 
+// 打开按钮下拉菜单状态
+const showOpenMenu = ref(false);
+const openMenuButton = ref<HTMLButtonElement | null>(null);
+
 // 字体设置面板状态
 const showFontPanel = ref(false);
 const fontPanelButton = ref<HTMLButtonElement | null>(null);
@@ -31,11 +38,43 @@ const fontPanelButton = ref<HTMLButtonElement | null>(null);
 // 切换最近文件菜单
 function toggleRecentMenu() {
   showRecentMenu.value = !showRecentMenu.value;
+  // 关闭其他菜单
+  if (showRecentMenu.value) {
+    showOpenMenu.value = false;
+    showFontPanel.value = false;
+  }
+}
+
+// 切换打开菜单
+function toggleOpenMenu() {
+  showOpenMenu.value = !showOpenMenu.value;
+  // 关闭其他菜单
+  if (showOpenMenu.value) {
+    showRecentMenu.value = false;
+    showFontPanel.value = false;
+  }
 }
 
 // 切换字体设置面板
 function toggleFontPanel() {
   showFontPanel.value = !showFontPanel.value;
+  // 关闭其他菜单
+  if (showFontPanel.value) {
+    showRecentMenu.value = false;
+    showOpenMenu.value = false;
+  }
+}
+
+// 打开文件
+function handleOpenFile() {
+  showOpenMenu.value = false;
+  emit('open');
+}
+
+// 打开文件夹
+function handleOpenFolder() {
+  showOpenMenu.value = false;
+  emit('open-folder');
 }
 
 // 选择字号
@@ -55,24 +94,44 @@ async function openRecentFile(filePath: string) {
   try {
     const { readTextFile } = await import('@tauri-apps/plugin-fs');
     const content = await readTextFile(filePath);
-    
+
     // 发送事件让父组件处理文件打开
     // 通过自定义事件传递文件路径和内容
     window.dispatchEvent(new CustomEvent('open-recent-file', {
       detail: { filePath, content }
     }));
-    
+
     showRecentMenu.value = false;
   } catch (error) {
     console.error('[Toolbar] 打开最近文件失败:', error);
+    // 显示错误对话框
+    showRecentFileError.value = true;
+    errorFilePath.value = filePath;
     showRecentMenu.value = false;
   }
+}
+
+// 最近文件错误对话框状态
+const showRecentFileError = ref(false);
+const errorFilePath = ref('');
+
+// 处理错误对话框的用户选择
+function handleRecentFileErrorChoice(choice: RecentFileErrorChoice) {
+  if (choice === 'remove') {
+    // 从最近记录中删除该文件
+    removeRecentFile(errorFilePath.value);
+  }
+  showRecentFileError.value = false;
+  errorFilePath.value = '';
 }
 
 // 点击外部关闭菜单
 function handleClickOutside(event: MouseEvent) {
   if (recentMenuButton.value && !recentMenuButton.value.contains(event.target as Node)) {
     showRecentMenu.value = false;
+  }
+  if (openMenuButton.value && !openMenuButton.value.contains(event.target as Node)) {
+    showOpenMenu.value = false;
   }
   if (fontPanelButton.value && !fontPanelButton.value.contains(event.target as Node)) {
     showFontPanel.value = false;
@@ -91,15 +150,49 @@ onUnmounted(() => {
 
 <template>
   <div class="toolbar" @contextmenu.prevent>
-    <button class="toolbar-btn" @click="$emit('open')">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-        <line x1="12" y1="11" x2="12" y2="17" />
-        <line x1="9" y1="14" x2="15" y2="14" />
-      </svg>
-      打开
-    </button>
-    
+    <!-- 打开按钮（下拉菜单） -->
+    <div class="open-menu-container">
+      <button
+        ref="openMenuButton"
+        class="toolbar-btn"
+        @click="toggleOpenMenu"
+        :class="{ 'active': showOpenMenu }"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+          <line x1="12" y1="11" x2="12" y2="17" />
+          <line x1="9" y1="14" x2="15" y2="14" />
+        </svg>
+        打开
+        <svg class="dropdown-arrow" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+
+      <!-- 打开下拉菜单 -->
+      <div v-if="showOpenMenu" class="open-dropdown">
+        <div class="open-item" @click="handleOpenFile">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+            <polyline points="14 2 14 8 20 8" />
+          </svg>
+          <div class="item-content">
+            <span class="item-label">打开文件</span>
+            <span class="item-hint">打开 Markdown 文件</span>
+          </div>
+        </div>
+        <div class="open-item" @click="handleOpenFolder">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+          </svg>
+          <div class="item-content">
+            <span class="item-label">打开文件夹</span>
+            <span class="item-hint">浏览文件夹中的 Markdown 文件</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 最近文件按钮 -->
     <div class="recent-menu-container">
       <button 
@@ -134,7 +227,14 @@ onUnmounted(() => {
         </ul>
       </div>
     </div>
-    
+
+    <!-- 最近文件错误对话框 -->
+    <RecentFileErrorDialog
+      :visible="showRecentFileError"
+      :file-path="errorFilePath"
+      @choice="handleRecentFileErrorChoice"
+    />
+
     <button class="toolbar-btn" @click="$emit('new')">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <line x1="12" y1="5" x2="12" y2="19" />
@@ -289,6 +389,7 @@ onUnmounted(() => {
   border-radius: 4px;
   cursor: pointer;
   font-size: 13px;
+  line-height: 1; /* 固定行高，避免亚像素差异 */
   color: #333;
   transition: all 0.2s;
 }
@@ -305,6 +406,71 @@ onUnmounted(() => {
 .toolbar-btn.active {
   background-color: #e0e0e0;
   border-color: #ccc;
+}
+
+/* 下拉箭头 */
+.dropdown-arrow {
+  margin-left: 2px;
+  opacity: 0.6;
+}
+
+/* 打开菜单容器 */
+.open-menu-container {
+  position: relative;
+}
+
+/* 打开下拉菜单 */
+.open-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  min-width: 240px;
+  background-color: #fff;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 1000;
+  overflow: hidden;
+}
+
+.open-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.open-item:hover {
+  background-color: #f5f5f5;
+}
+
+.open-item svg {
+  flex-shrink: 0;
+  color: #666;
+}
+
+.open-item:hover svg {
+  color: #1890ff;
+}
+
+.item-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.item-label {
+  font-size: 13px;
+  color: #333;
+  font-weight: 500;
+}
+
+.item-hint {
+  font-size: 11px;
+  color: #999;
 }
 
 /* 最近文件菜单容器 */
@@ -485,6 +651,31 @@ html.dark .toolbar-btn:active {
 html.dark .toolbar-btn.active {
   background-color: #4a4a4a;
   border-color: #5a5a5a;
+}
+
+html.dark .open-dropdown {
+  background-color: #3c3c3c;
+  border-color: #4a4a4a;
+}
+
+html.dark .open-item:hover {
+  background-color: #4a4a4a;
+}
+
+html.dark .open-item svg {
+  color: #999;
+}
+
+html.dark .open-item:hover svg {
+  color: #66b8ff;
+}
+
+html.dark .item-label {
+  color: #d4d4d4;
+}
+
+html.dark .item-hint {
+  color: #888;
 }
 
 html.dark .recent-dropdown {

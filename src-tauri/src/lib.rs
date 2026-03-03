@@ -7,6 +7,9 @@ use std::io::Write;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_cli::CliExt;
+use std::panic;
+use std::backtrace::Backtrace;
+use chrono::Local;
 
 // 全局状态：保存待打开的文件路径
 struct AppState {
@@ -78,24 +81,81 @@ impl log::Log for FileLogger {
     }
 }
 
-// 简单的时间戳生成（避免引入 chrono 依赖）
+// 使用 chrono 生成准确的本地时间戳
 fn chrono_timestamp() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
+}
 
-    if let Ok(duration) = SystemTime::now().duration_since(UNIX_EPOCH) {
-        let secs = duration.as_secs();
-        // 简单格式化为 ISO 时间
-        format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-            (secs / 31536000) + 1970,        // 粗略计算年份
-            (secs % 31536000 / 2592000) + 1, // 粗略计算月份
-            (secs % 2592000 / 86400) + 1,    // 粗略计算日期
-            (secs % 86400 / 3600),           // 小时
-            (secs % 3600 / 60),              // 分钟
-            secs % 60                        // 秒
-        )
+// 设置全局 panic hook，捕获所有未处理的 panic
+fn setup_global_panic_hook() {
+    panic::set_hook(Box::new(|panic_info| {
+        // 获取 panic 的消息
+        let payload = panic_info.payload();
+        let payload_str = if let Some(s) = payload.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "Unknown payload".to_string()
+        };
+
+        // 获取 panic 的位置
+        let location = if let Some(loc) = panic_info.location() {
+            format!("{}:{}:{}", loc.file(), loc.line(), loc.column())
+        } else {
+            "Unknown location".to_string()
+        };
+
+        // 获取 backtrace
+        let backtrace = Backtrace::capture();
+
+        // 构建完整的 panic 信息
+        let panic_message = format!(
+            "=== APPLICATION PANIC ===\n\
+             Time: {}\n\
+             Message: {}\n\
+             Location: {}\n\
+             Backtrace:\n{:?}\n\
+             =========================",
+            chrono_timestamp(),
+            payload_str,
+            location,
+            backtrace
+        );
+
+        // 尝试写入日志文件
+        let log_path = get_log_path();
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            let _ = file.write_all(panic_message.as_bytes());
+            let _ = file.write_all(b"\n");
+            let _ = file.flush();
+        }
+
+        // 同时输出到 stderr
+        eprintln!("{}", panic_message);
+
+        // 在 Windows 上，也尝试输出到调试器
+        #[cfg(target_os = "windows")]
+        {
+            // 确保消息被刷新
+            use std::io::Write;
+            let _ = std::io::stderr().flush();
+        }
+    }));
+}
+
+// 获取日志文件路径
+fn get_log_path() -> std::path::PathBuf {
+    if let Ok(mut exe_path) = std::env::current_exe() {
+        exe_path.pop();
+        exe_path.push("cherrymarkdowndesktop.log");
+        exe_path
     } else {
-        "Unknown".to_string()
+        std::path::PathBuf::from("cherrymarkdowndesktop.log")
     }
 }
 
@@ -118,9 +178,47 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+/// 测试命令：用于验证异常捕获功能
+/// 注意：这个命令仅用于测试，仅在 debug 模式下可用
+#[cfg(debug_assertions)]
+#[tauri::command]
+fn test_panic(mode: String) -> Result<String, String> {
+    log::warn!("Test panic command called with mode: {}", mode);
+
+    match mode.as_str() {
+        "unwrap" => {
+            log::error!("Triggering unwrap panic for testing");
+            let _none: Option<&str> = None;
+            let _ = _none.unwrap(); // 这会触发 panic
+            Ok("This should never be reached".to_string())
+        }
+        "expect" => {
+            log::error!("Triggering expect panic for testing");
+            let _none: Option<&str> = None;
+            let _ = _none.expect("Test expect panic"); // 这会触发 panic
+            Ok("This should never be reached".to_string())
+        }
+        "panic" => {
+            log::error!("Triggering explicit panic for testing");
+            panic!("Test panic from command");
+        }
+        "error" => {
+            log::error!("Returning error for testing");
+            Err("Test error returned from command".to_string())
+        }
+        _ => {
+            log::info!("Test command called with unknown mode");
+            Ok(format!("Unknown mode: {}. Use: unwrap, expect, panic, or error", mode))
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 初始化日志系统
+    // 【步骤 1】首先设置全局 panic hook，必须在任何可能 panic 的操作之前调用
+    setup_global_panic_hook();
+
+    // 【步骤 2】初始化日志系统
     let log_level = if cfg!(debug_assertions) {
         LevelFilter::Debug
     } else {
@@ -144,7 +242,8 @@ pub fn run() {
         std::env::args().collect::<Vec<_>>()
     );
 
-    tauri::Builder::default()
+    // 【步骤 3】构建并运行 Tauri 应用，使用自定义错误处理而不是 expect()
+    let result = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             // 当尝试启动第二个实例时，这个回调会被执行
             log::info!("Single instance: Another instance tried to start with args: {:?}", args);
@@ -225,7 +324,51 @@ pub fn run() {
             log::info!("Application setup completed");
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_pending_file, greet, log_frontend])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .invoke_handler(tauri::generate_handler![
+            get_pending_file,
+            greet,
+            log_frontend,
+            #[cfg(debug_assertions)]
+            test_panic
+        ])
+        .run(tauri::generate_context!());
+
+    // 【步骤 4】处理应用运行时的错误
+    if let Err(e) = result {
+        // 构建详细的错误信息
+        let error_message = format!(
+            "=== APPLICATION RUNTIME ERROR ===\n\
+             Time: {}\n\
+             Error: {}\n\
+             =================================",
+            chrono_timestamp(),
+            e
+        );
+
+        // 记录到日志文件
+        let log_path = get_log_path();
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            let _ = file.write_all(error_message.as_bytes());
+            let _ = file.write_all(b"\n");
+            let _ = file.flush();
+        }
+
+        // 输出到 stderr
+        eprintln!("{}", error_message);
+
+        // 在开发模式下，使用 std::process::exit 会触发 panic hook
+        // 在生产模式下，我们记录错误后优雅退出
+        if cfg!(debug_assertions) {
+            // 开发模式：直接 panic 以便看到完整堆栈
+            panic!("Application runtime error: {}", e);
+        } else {
+            // 生产模式：记录日志后退出
+            log::error!("Application runtime error: {}", e);
+            std::process::exit(1);
+        }
+    }
 }

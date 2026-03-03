@@ -9,7 +9,15 @@ import { useTheme } from '../composables/useTheme';
 import { useFontSize, type FontSizeLevel } from '../composables/useFontSize';
 import { useFontFamily } from '../composables/useFontFamily';
 import type { ExportFormat } from './ExportFormatDialog.vue';
-import { resolvePath } from '../utils/pathUtils';
+import {
+  resolvePath,
+  identifyPath,
+  PathType,
+  isAssetLocalhostUrl,
+  extractLocalPathFromAssetUrl,
+  convertLocalPathToAssetUrl,
+  isAssetLocalhostAvailable
+} from '../utils/pathUtils';
 
 // 注意：mermaid 插件已在 main.ts 中通过 initCherryPlugins() 预先注册
 // 不需要在此组件中再次注册，避免 "usePlugin should be called before Cherry is instantiated" 错误
@@ -22,6 +30,8 @@ const emit = defineEmits<{
   (e: 'update:content', content: string): void;
   (e: 'click-link', href: string): void;
   (e: 'save'): void;
+  (e: 'anchor-error', anchorId: string): void;
+  (e: 'link-error', href: string, reason: string): void;
 }>();
 
 const editorRef = ref<HTMLDivElement | null>(null);
@@ -32,6 +42,7 @@ const { isMonospace, initFontFamily } = useFontFamily();
 let cherryEditor: Cherry | null = null;
 let isInternalChange = false; // 标志位：区分用户编辑和程序更新
 let isSwitchingTab = false; // 标志位：标识正在切换标签（防止首次编辑被误判为内部更新）
+let isDestroyed = false; // 标志位：标识组件是否已销毁（防止异步回调中创建新实例）
 
 // 更新 Cherry Markdown 的 CSS 字体变量
 const updateFontSizes = () => {
@@ -134,6 +145,7 @@ const initEditor = async () => {
   }
 
   // 仿照 examples/index.html 的完整配置
+  console.log('[CherryEditor] Initializing Cherry with anchorStyle: none and updateLocationHash: false');
   cherryEditor = new Cherry({
     el: editorRef.value,
     value: content,
@@ -153,6 +165,15 @@ const initEditor = async () => {
         flowSessionContext: false,
       },
       syntax: {
+        header: {
+          // 禁用标题锚点，避免在 asset 协议下生成错误的 URL
+          anchorStyle: 'none',
+        },
+        toc: {
+          // 禁止更新 URL hash，避免在 asset 协议下出现 500 错误
+          allowMultiToc: false,
+          showAutoNumber: false,
+        },
         codeBlock: {
           theme: 'twilight',
           lineNumber: true,
@@ -221,6 +242,8 @@ const initEditor = async () => {
       sidebar: ['theme'],
       toc: {
         defaultModel: 'full',
+        // 禁止更新 URL hash，避免在 asset 协议下出现 500 错误
+        updateLocationHash: false,
       },
     },
     editor: {
@@ -232,33 +255,65 @@ const initEditor = async () => {
     },
     callback: {
       urlProcessor: (url: string, srcType: string) => {
-        // 如果是 http/https/data 链接，直接返回
-        if (/^(https?:|data:)/.test(url)) {
+        // 1. 跳过锚点链接（文档内部跳转，直接使用）
+        if (url.startsWith('#')) {
           return url;
         }
 
-        // 获取当前文件路径
-        const currentFilePath = props.tab?.filePath;
+        // 2. 跳过 data URL 和 HTTP/HTTPS URL（直接使用）
+        if (/^(data:|https?:)/.test(url)) {
+          return url;
+        }
 
-        // 如果是 untitled 文件（未保存），无法解析相对路径
+        // 2. 获取当前文件路径
+        const currentFilePath = props.tab?.filePath;
         if (!currentFilePath || currentFilePath.startsWith('untitled')) {
           return url;
         }
 
+        // 3. 识别路径类型并处理
+        const pathType = identifyPath(url);
+
         try {
-          // 解析相对路径为绝对路径（resolvePath 返回正斜杠格式）
-          const absolutePath = resolvePath(currentFilePath, url);
+          switch (pathType) {
+            case PathType.ASSET_URL: {
+              // asset.localhost URL
+              const currentIsAssetUrl = isAssetLocalhostUrl(currentFilePath);
+              if (currentIsAssetUrl) {
+                // 环境支持 asset.localhost，直接使用
+                return url;
+              } else {
+                // 环境不支持，提取本地路径并使用 convertFileSrc
+                const localPath = extractLocalPathFromAssetUrl(url);
+                return convertFileSrc(localPath);
+              }
+            }
 
-          // 直接使用绝对路径，让 Tauri 的 convertFileSrc 处理
-          // 注意：不再移除 Windows 盘符，直接传入完整路径
-          const tauriUrl = convertFileSrc(absolutePath);
+            case PathType.LOCAL:
+            case PathType.RELATIVE: {
+              // 本地文件或相对路径
+              const absolutePath = resolvePath(currentFilePath, url);
 
-          return tauriUrl;
+              // 检测当前环境是否支持 asset.localhost
+              const assetAvailable = isAssetLocalhostAvailable(currentFilePath);
+              if (assetAvailable) {
+                // 使用 asset.localhost URL
+                return convertLocalPathToAssetUrl(absolutePath);
+              } else {
+                // 使用 Tauri 的 convertFileSrc
+                return convertFileSrc(absolutePath);
+              }
+            }
+
+            default:
+              return url;
+          }
         } catch (error) {
-          console.error('[CherryEditor] Failed to resolve URL:', error, {
+          console.error('[CherryEditor] Failed to process URL:', error, {
             url,
             srcType,
             currentFilePath,
+            pathType,
           });
           return url;
         }
@@ -269,13 +324,124 @@ const initEditor = async () => {
         if (anchor) {
           const href = anchor.getAttribute('href');
           if (href) {
+            // 处理 Markdown 文件链接
             if (href.endsWith('.md') || href.endsWith('.markdown')) {
               e.preventDefault();
               e.stopPropagation();
               emit('click-link', href);
+              return;
+            }
+
+            // 处理锚点链接（以 # 开头的链接）
+            if (href.startsWith('#')) {
+              e.preventDefault();
+              e.stopPropagation();
+
+              // TOC 生成的链接是 URL 编码的，标题 ID 也是编码的
+              // 直接使用 href 的值（去掉 #）作为 ID 查找
+              let anchorId = href.substring(1); // 去掉 #，保持编码格式
+              let targetElement = document.getElementById(anchorId);
+
+              // 如果找不到，尝试通过文本内容模糊匹配标题
+              // 处理 Cherry Markdown 的疑似 bug：TOC 链接与标题 ID 不一致
+              if (!targetElement) {
+                const decodedText = decodeURIComponent(anchorId);
+
+                // 去除开头的中文数字和可选的顿号
+                // 注意：? 必须是英文问号，表示"可选"
+                const searchPattern = decodedText.replace(/^[一二三四五六七八九十百千]+、?/, '');
+
+                const previewerDom = editorRef.value?.querySelector('.cherry-previewer') as HTMLElement;
+                if (previewerDom) {
+                  const allHeaders = previewerDom.querySelectorAll('h1, h2, h3, h4, h5, h6');
+
+                  // 查找包含目标文本的标题
+                  const matchingHeader = Array.from(allHeaders).find((h): h is HTMLElement =>
+                    h.textContent?.includes(searchPattern) ?? false
+                  ) as HTMLElement | undefined;
+
+                  if (matchingHeader) {
+                    targetElement = matchingHeader;
+                    console.log('[CherryEditor] Found header by text matching:', decodedText, '->', matchingHeader.textContent?.substring(0, 30));
+                  }
+                }
+              }
+
+              if (targetElement) {
+                // 使用 requestAnimationFrame 异步滚动，减少 Tauri WebView 事件循环警告
+                requestAnimationFrame(() => {
+                  targetElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                });
+                console.log('[CherryEditor] Scrolled to anchor:', anchorId);
+              } else {
+                console.warn('[CherryEditor] Anchor not found:', anchorId);
+                // 发出错误事件，让 App.vue 显示错误提示
+                emit('anchor-error', anchorId);
+              }
+              return;
+            }
+
+            // 处理 asset.localhost URL（本地文件的 HTTP 代理）
+            // 这些 URL 实际指向本地文件，需要特殊处理
+            if (isAssetLocalhostUrl(href)) {
+              e.preventDefault();
+              e.stopPropagation();
+
+              // 提取本地文件路径
+              const localPath = extractLocalPathFromAssetUrl(href);
+
+              // 检查是否为 Markdown 文件
+              if (localPath.endsWith('.md') || localPath.endsWith('.markdown')) {
+                // Markdown 文件：触发 click-link 事件，由 App.vue 处理打开
+                console.log('[CherryEditor] Asset URL Markdown link:', localPath);
+                emit('click-link', localPath);
+              } else {
+                // 非 Markdown 文件：拦截并提示错误
+                console.warn('[CherryEditor] Blocked non-markdown asset URL:', href, '->', localPath);
+                emit('link-error', href, '不支持的链接类型（非 Markdown 文件）');
+              }
+              return;
+            }
+
+            // 处理外部 HTTP/HTTPS 链接（排除 asset.localhost）
+            // 在系统默认浏览器中打开，避免在当前 WebView 中导航导致程序失控
+            if (href.startsWith('http://') || href.startsWith('https://')) {
+              e.preventDefault();
+              e.stopPropagation();
+
+              // 动态导入 opener 插件并打开链接
+              import('@tauri-apps/plugin-opener').then(({ openUrl }) => {
+                openUrl(href)
+                  .then(() => {
+                    console.log('[CherryEditor] Opened external URL in default browser:', href);
+                  })
+                  .catch((err) => {
+                    console.error('[CherryEditor] Failed to open external URL:', err);
+                    emit('link-error', href, '无法打开外部链接');
+                  });
+              }).catch((err) => {
+                console.error('[CherryEditor] Failed to import opener plugin:', err);
+                emit('link-error', href, ' opener 插件不可用');
+              });
+
+              return;
+            }
+
+            // 拦截其他本地路径链接（file://、Windows 绝对路径、Unix 绝对路径）
+            // 这些链接可能是目录或非 Markdown 文件，会导致浏览器导航错误
+            // 注意：asset.localhost URL 已在上面处理，此处不再检查
+            if (href.startsWith('file://') ||
+                /^[A-Za-z]:/.test(href) ||
+                /^\//.test(href)) {
+              e.preventDefault();
+              e.stopPropagation();
+              console.warn('[CherryEditor] Blocked non-markdown local link:', href);
+              emit('link-error', href, '不支持的链接类型');
+              return;
             }
           }
         }
+        // 其他链接（如 HTTP/HTTPS）返回 undefined，让浏览器默认处理
       },
       afterChange: (newContent: string) => {
         if (typeof newContent === 'string') {
@@ -382,7 +548,7 @@ watch(
     }
 
     // 延迟重置标志位，确保 setValue 的 afterChange 已经触发完毕
-    // 使用 100ms 延迟，确保 Cherry Markdown 内部处理完成
+    // 使用 100ms 延迟确保可靠性
     setTimeout(() => {
       isSwitchingTab = false;
       console.log(`[CherryEditor] Tab switch completed for ${newId}, isSwitchingTab reset to false`);
@@ -456,7 +622,7 @@ watch(
         isSwitchingTab = true;
         cherryEditor.setValue(content);
 
-        // 延迟重置标志位
+        // 延迟重置标志位，确保 setValue 的 afterChange 已经触发完毕
         setTimeout(() => {
           isSwitchingTab = false;
           console.log('[CherryEditor] Content update completed, isSwitchingTab reset to false');
@@ -485,8 +651,12 @@ watch(isDark, (newValue) => {
         cherryEditor.destroy();
         cherryEditor = null;
 
-        // 重新创建编辑器
+        // 重新创建编辑器（检查组件是否已销毁）
         setTimeout(async () => {
+          if (isDestroyed) {
+            console.log('[CherryEditor] Component destroyed, skipping editor recreation');
+            return;
+          }
           await initEditor();
         }, 0);
       }
@@ -498,8 +668,12 @@ watch(isDark, (newValue) => {
         cherryEditor = null;
       }
 
-      // 重新创建编辑器
+      // 重新创建编辑器（检查组件是否已销毁）
       setTimeout(async () => {
+        if (isDestroyed) {
+          console.log('[CherryEditor] Component destroyed, skipping editor recreation');
+          return;
+        }
         await initEditor();
       }, 0);
     }
@@ -606,8 +780,11 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  // 标记组件已销毁，防止异步回调中创建新编辑器实例
+  isDestroyed = true;
   if (cherryEditor) {
     cherryEditor.destroy();
+    cherryEditor = null;
   }
   // 移除键盘事件监听
   window.removeEventListener('keydown', handleKeyDown);
@@ -856,35 +1033,48 @@ const exportPNG = async (): Promise<{ blob: Blob; filename: string }> => {
 
 /**
  * 将图片路径转换为 base64 data URL
- * 支持相对路径和绝对路径
+ * 支持相对路径、绝对路径和 asset.localhost URL
  */
 const convertImageToBase64 = async (imagePath: string): Promise<string> => {
   try {
-    // 如果已经是 data URL 或 http URL，直接返回
+    // 1. 跳过已经是 data URL 或 http URL 的图片
     if (/^(data:|https?:)/.test(imagePath)) {
       return imagePath;
     }
 
-    // 获取当前文件路径
+    // 2. 获取当前文件路径
     const currentFilePath = props.tab?.filePath;
-
-    // 如果是 untitled 文件（未保存），无法解析相对路径
     if (!currentFilePath || currentFilePath.startsWith('untitled')) {
       console.warn('[CherryEditor] Cannot resolve image path: no valid file path', { imagePath, currentFilePath });
       return imagePath;
     }
 
-    // 解析相对路径为绝对路径
-    const absolutePath = resolvePath(currentFilePath, imagePath);
+    // 3. 识别路径类型并处理
+    const pathType = identifyPath(imagePath);
+    let localPath: string;
 
-    // 读取图片文件为二进制数据
-    const imageBytes = await readFile(absolutePath);
+    switch (pathType) {
+      case PathType.ASSET_URL:
+        // asset.localhost URL：提取本地路径
+        localPath = extractLocalPathFromAssetUrl(imagePath);
+        break;
 
-    // 转换为 base64
+      case PathType.LOCAL:
+      case PathType.RELATIVE:
+        // 本地文件或相对路径：解析为绝对路径
+        localPath = resolvePath(currentFilePath, imagePath);
+        break;
+
+      default:
+        return imagePath;
+    }
+
+    // 4. 读取本地文件并转换为 base64
+    const imageBytes = await readFile(localPath);
     const base64 = arrayBufferToBase64(imageBytes);
 
-    // 根据文件扩展名确定 MIME 类型
-    const ext = absolutePath.split('.').pop()?.toLowerCase() || 'png';
+    // 5. 根据文件扩展名确定 MIME 类型
+    const ext = localPath.split('.').pop()?.toLowerCase() || 'png';
     const mimeTypes: Record<string, string> = {
       'png': 'image/png',
       'jpg': 'image/jpeg',
@@ -896,7 +1086,7 @@ const convertImageToBase64 = async (imagePath: string): Promise<string> => {
     };
     const mimeType = mimeTypes[ext] || 'image/png';
 
-    // 返回 data URL
+    // 6. 返回 data URL
     return `data:${mimeType};base64,${base64}`;
   } catch (error) {
     console.error('[CherryEditor] Failed to convert image to base64:', error, { imagePath });

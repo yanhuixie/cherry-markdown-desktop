@@ -1,21 +1,32 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue';
-import { readTextFile, writeTextFile, writeFile, watch as watchFile } from '@tauri-apps/plugin-fs';
-import { open, save } from '@tauri-apps/plugin-dialog';
-import { invoke } from '@tauri-apps/api/core';
+import { readTextFile, writeTextFile, writeFile } from '@tauri-apps/plugin-fs';
+import { open as openDialog, save } from '@tauri-apps/plugin-dialog';
+import { invoke } from './utils/tauriInvoke'; // 使用带错误拦截的 invoke 包装器
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { tabs, activeTabId, closeTab, closeLeftTabs, closeRightTabs, closeAllTabs, setActiveTab, updateTabContent, markTabSaved, addRecentFile } from './stores/tabStore';
+import { tabs, activeTabId, closeTab, closeLeftTabs, closeRightTabs, closeAllTabs, setActiveTab, updateTabContent, markTabSaved, addRecentFile, createTabItem, isTabDirty, type TabItem } from './stores/tabStore';
+import { fileWatchManager } from './stores/fileWatchManager';
+import { FileSyncStatus, transitionOnExternalModify } from './stores/fileSyncStatus';
 import TabBar from './components/TabBar.vue';
 import Toolbar from './components/Toolbar.vue';
 import CherryEditor from './components/CherryEditor.vue';
 import AboutDialog from './components/AboutDialog.vue';
 import FileReloadDialog from './components/FileReloadDialog.vue';
+import FileDeletedDialog from './components/FileDeletedDialog.vue';
 import UnsavedChangesDialog, { type UserChoice } from './components/UnsavedChangesDialog.vue';
 import ExportFormatDialog, { type ExportFormat } from './components/ExportFormatDialog.vue';
 import LoadingDialog from './components/LoadingDialog.vue';
 import ConfirmDialog, { type ConfirmChoice } from './components/ConfirmDialog.vue';
+import ErrorDialog from './components/ErrorDialog.vue';
+import Sidebar from './components/Sidebar/Sidebar.vue';
+import { openFolder, sidebarState } from './stores/sidebarStore';
 import { useFileOpener } from './composables/useFileOpener';
-import { resolvePath } from './utils/pathUtils';
+import {
+  resolvePath,
+  identifyPath,
+  PathType,
+  extractLocalPathFromAssetUrl
+} from './utils/pathUtils';
 
 // 文件监视相关常量
 const FILE_WATCH_DEBOUNCE_MS = 500; // 文件监视的防抖延迟（毫秒）
@@ -26,8 +37,13 @@ const showFileReloadDialog = ref(false);
 const pendingReloadFileName = ref('');
 const pendingReloadFilePath = ref('');
 const pendingReloadHasUnsavedChanges = ref(false);
-let unwatchFn: (() => void) | null = null;
-let isSavingFile = false; // 标志位：标识当前是否正在保存文件（用于区分自身保存和外部修改）
+const pendingReloadTabs = ref<Set<string>>(new Set()); // 待处理的标签页 ID 集合
+
+// 文件删除对话框状态
+const showFileDeletedDialog = ref(false);
+const pendingDeletedFileName = ref('');
+const pendingDeletedFilePath = ref('');
+const pendingDeletedHasUnsavedChanges = ref(false);
 
 // 未保存变更对话框状态
 const showUnsavedChangesDialog = ref(false);
@@ -57,14 +73,17 @@ const loadingMessage = ref('');
 const showCloseAllConfirmDialog = ref(false);
 const closeAllConfirmMessage = ref('');
 
+// 错误提示对话框状态
+const showErrorDialog = ref(false);
+const errorDialogTitle = ref('');
+const errorMessage = ref('');
+
 // Cherry Editor 组件引用
 const cherryEditorRef = ref<InstanceType<typeof CherryEditor> | null>(null);
 
 // 设置单实例文件打开监听器
 useFileOpener((filePath: string, content: string) => {
   console.log('[App] Opening file from single instance:', filePath);
-
-  const fileName = filePath.split(/[/\\]/).pop() || filePath;
 
   // 检查是否已经打开该文件
   const existingTab = tabs.find(t => t.filePath === filePath);
@@ -76,13 +95,8 @@ useFileOpener((filePath: string, content: string) => {
 
   // 创建新标签
   const id = `tab-${Date.now()}`;
-  tabs.push({
-    id,
-    filePath,
-    fileName,
-    content,
-    isDirty: false,
-  });
+  const newTab = createTabItem(id, filePath, content, false);
+  tabs.push(newTab);
   activeTabId.value = id;
   console.log('[App] File opened successfully from single instance');
 });
@@ -113,7 +127,7 @@ onMounted(async () => {
       }
 
       // 查找所有有未保存修改的标签页
-      const dirtyTabs = tabs.filter(t => t.isDirty);
+      const dirtyTabs = tabs.filter(t => isTabDirty(t));
       console.log('[App] Dirty tabs count:', dirtyTabs.length);
 
       if (dirtyTabs.length > 0) {
@@ -123,89 +137,103 @@ onMounted(async () => {
 
         // 异步处理未保存的标签页
         (async () => {
-          // 处理每个未保存的标签页
-          for (const tab of dirtyTabs) {
-            console.log('[App] Processing dirty tab:', tab.fileName);
-            pendingCloseTabId.value = tab.id;
-            pendingCloseFileName.value = tab.fileName;
+          try {
+            // 处理每个未保存的标签页
+            for (const tab of dirtyTabs) {
+              console.log('[App] Processing dirty tab:', tab.fileName);
+              pendingCloseTabId.value = tab.id;
+              pendingCloseFileName.value = tab.fileName;
 
-            // 先隐藏对话框（如果之前显示过）
-            showUnsavedChangesDialog.value = false;
-            await nextTick();
-
-            // 然后显示对话框
-            showUnsavedChangesDialog.value = true;
-            await nextTick();
-
-            console.log('[App] Dialog should be visible now');
-
-            // 等待用户选择
-            const choice = await new Promise<UserChoice>((resolve) => {
-              pendingWindowCloseResolve = resolve;
-            });
-
-            console.log('[App] User choice:', choice);
-
-            // 根据用户选择处理
-            if (choice === 'cancel') {
-              // 用户取消，停止关闭流程
-              console.log('[App] User cancelled, stopping close');
-              pendingCloseTabId.value = null;
-              pendingCloseFileName.value = '';
+              // 先隐藏对话框（如果之前显示过）
               showUnsavedChangesDialog.value = false;
-              return;
-            } else if (choice === 'discard') {
-              // 放弃修改，继续下一个标签页
-              console.log('[App] User discarded changes');
-              pendingCloseTabId.value = null;
-              pendingCloseFileName.value = '';
-              showUnsavedChangesDialog.value = false;
-              continue;
-            } else if (choice === 'save') {
-              // 保存文件
-              console.log('[App] User chose to save');
-              isSavingFile = true; // 标记正在保存
-              try {
-                if (tab.filePath && !tab.filePath.startsWith('untitled')) {
-                  await writeTextFile(tab.filePath, tab.content);
-                  markTabSaved(tab.id);
-                } else {
-                  // 未命名文件，需要另存为
-                  const filePath = await save({
-                    filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
-                  });
-                  if (!filePath) {
-                    // 用户取消了另存为，停止关闭流程
-                    console.log('[App] User cancelled save as, stopping close');
-                    isSavingFile = false;
-                    pendingCloseTabId.value = null;
-                    pendingCloseFileName.value = '';
-                    showUnsavedChangesDialog.value = false;
-                    return;
+              await nextTick();
+
+              // 然后显示对话框
+              showUnsavedChangesDialog.value = true;
+              await nextTick();
+
+              console.log('[App] Dialog should be visible now');
+
+              // 等待用户选择
+              const choice = await new Promise<UserChoice>((resolve) => {
+                pendingWindowCloseResolve = resolve;
+              });
+
+              console.log('[App] User choice:', choice);
+
+              // 根据用户选择处理
+              if (choice === 'cancel') {
+                // 用户取消，停止关闭流程
+                console.log('[App] User cancelled, stopping close');
+                pendingCloseTabId.value = null;
+                pendingCloseFileName.value = '';
+                showUnsavedChangesDialog.value = false;
+                return;
+              } else if (choice === 'discard') {
+                // 放弃修改，继续下一个标签页
+                console.log('[App] User discarded changes');
+                pendingCloseTabId.value = null;
+                pendingCloseFileName.value = '';
+                showUnsavedChangesDialog.value = false;
+                continue;
+              } else if (choice === 'save') {
+                // 保存文件
+                console.log('[App] User chose to save');
+                fileWatchManager.setSaving(true, tab.filePath, tab.content); // 标记正在保存
+                try {
+                  if (tab.filePath && !tab.filePath.startsWith('untitled')) {
+                    await writeTextFile(tab.filePath, tab.content);
+                    markTabSaved(tab.id);
+                  } else {
+                    // 未命名文件，需要另存为
+                    const filePath = await save({
+                      filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
+                    });
+                    if (!filePath) {
+                      // 用户取消了另存为，停止关闭流程
+                      console.log('[App] User cancelled save as, stopping close');
+                      fileWatchManager.setSaving(false, tab.filePath);
+                      pendingCloseTabId.value = null;
+                      pendingCloseFileName.value = '';
+                      showUnsavedChangesDialog.value = false;
+                      return;
+                    }
+                    await writeTextFile(filePath, tab.content);
+                    tab.filePath = filePath;
+                    tab.fileName = filePath.split(/[/\\]/).pop() || filePath;
+                    markTabSaved(tab.id);
                   }
-                  await writeTextFile(filePath, tab.content);
-                  tab.filePath = filePath;
-                  tab.fileName = filePath.split(/[/\\]/).pop() || filePath;
-                  markTabSaved(tab.id);
+                  // 延迟清除标志位
+                  setTimeout(() => {
+                    fileWatchManager.setSaving(false, tab.filePath);
+                  }, SAVE_FLAG_CLEAR_DELAY_MS);
+                } catch (error) {
+                  fileWatchManager.setSaving(false, tab.filePath);
+                  throw error;
                 }
-                // 延迟清除标志位
-                setTimeout(() => {
-                  isSavingFile = false;
-                }, SAVE_FLAG_CLEAR_DELAY_MS);
-              } catch (error) {
-                isSavingFile = false;
-                throw error;
+                pendingCloseTabId.value = null;
+                pendingCloseFileName.value = '';
+                showUnsavedChangesDialog.value = false;
               }
-              pendingCloseTabId.value = null;
-              pendingCloseFileName.value = '';
-              showUnsavedChangesDialog.value = false;
             }
-          }
 
-          // 所有未保存的文件都已处理，设置标志位并关闭窗口
-          console.log('[App] All dirty tabs processed, closing window');
-          shouldAllowWindowClose = true;
-          await getCurrentWindow().close();
+            // 所有未保存的文件都已处理，设置标志位并关闭窗口
+            console.log('[App] All dirty tabs processed, closing window');
+            shouldAllowWindowClose = true;
+            await getCurrentWindow().close();
+          } catch (error) {
+            // 窗口关闭处理错误边界
+            console.error('[App] Window close handler error:', error);
+            shouldAllowWindowClose = false;
+            // 恢复状态
+            pendingCloseTabId.value = null;
+            pendingCloseFileName.value = '';
+            showUnsavedChangesDialog.value = false;
+            // 显示错误提示
+            errorDialogTitle.value = '关闭失败';
+            errorMessage.value = `保存文件时发生错误：${error}`;
+            showErrorDialog.value = true;
+          }
         })();
       }
     });
@@ -222,6 +250,10 @@ onMounted(async () => {
 
   // 添加最近文件事件监听
   window.addEventListener('open-recent-file', handleOpenRecentFile);
+
+  // 添加侧边栏事件监听
+  window.addEventListener('sidebar-open-file', handleSidebarOpenFile);
+  window.addEventListener('sidebar-open-folder', handleSidebarOpenFolder);
 });
 
 // 从文件路径打开文件
@@ -229,7 +261,6 @@ async function openFileFromPath(filePath: string) {
   try {
     console.log('[App] Opening file:', filePath);
     const content = await readTextFile(filePath);
-    const fileName = filePath.split(/[/\\]/).pop() || filePath;
 
     // 检查是否已经打开该文件
     const existingTab = tabs.find(t => t.filePath === filePath);
@@ -243,13 +274,8 @@ async function openFileFromPath(filePath: string) {
 
     // 创建新标签
     const id = `tab-${Date.now()}`;
-    tabs.push({
-      id,
-      filePath,
-      fileName,
-      content, // 存储原始内容
-      isDirty: false,
-    });
+    const newTab = createTabItem(id, filePath, content, false);
+    tabs.push(newTab);
     activeTabId.value = id;
     // 添加到最近文件
     addRecentFile(filePath);
@@ -280,25 +306,21 @@ function handleNew() {
   const fileName = `未命名-${untitledCount}.md`;
   const filePath = `untitled-${id}`;
 
-  tabs.push({
-    id,
-    filePath,
-    fileName,
-    content: '', // 空内容
-    isDirty: true, // 新建文件标记为未保存状态
-  });
+  // 创建新标签（新建文件标记为 UNNAMED 状态）
+  const newTab = createTabItem(id, filePath, '', true);
+  newTab.fileName = fileName; // 覆盖文件名
+  tabs.push(newTab);
   activeTabId.value = id;
 }
 
 async function handleOpen() {
-  const filePath = await open({
+  const filePath = await openDialog({
     multiple: false,
     filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
   });
 
   if (filePath) {
     const content = await readTextFile(filePath);
-    const fileName = filePath.split(/[/\\]/).pop() || filePath;
 
     // 检查是否已经打开该文件
     const existingTab = tabs.find(t => t.filePath === filePath);
@@ -311,16 +333,33 @@ async function handleOpen() {
 
     // 创建新标签
     const id = `tab-${Date.now()}`;
-    tabs.push({
-      id,
-      filePath,
-      fileName,
-      content, // 存储原始内容
-      isDirty: false,
-    });
+    const newTab = createTabItem(id, filePath, content, false);
+    tabs.push(newTab);
     activeTabId.value = id;
     // 添加到最近文件
     addRecentFile(filePath);
+  }
+}
+
+// 从 Toolbar 打开文件夹
+async function handleOpenFolderFromToolbar() {
+  try {
+    const folderPath = await openDialog({
+      directory: true,
+      title: '选择文件夹',
+    });
+
+    if (folderPath) {
+      await openFolder(folderPath as string);
+      // 切换到文件夹浏览器标签
+      sidebarState.activeTab = 'fileExplorer';
+      console.log('[App] Folder opened from toolbar:', folderPath);
+    }
+  } catch (error) {
+    console.error('[App] Failed to open folder:', error);
+    errorDialogTitle.value = '打开文件夹失败';
+    errorMessage.value = `无法打开文件夹：\n\n${error}`;
+    showErrorDialog.value = true;
   }
 }
 
@@ -328,21 +367,23 @@ async function handleSave() {
   const tab = activeTab.value;
   if (!tab) return;
 
-  if (!tab.filePath || tab.filePath.startsWith('untitled')) {
+  // 远程 URL 文件、untitled 文件需要执行"另存为"
+  if (!tab.filePath || tab.filePath.startsWith('untitled') || /^https?:\/\//.test(tab.filePath)) {
     handleSaveAs();
     return;
   }
 
-  isSavingFile = true; // 标记正在保存
+  // 标记正在保存，并记录内容哈希用于比对
+  fileWatchManager.setSaving(true, tab.filePath, tab.content);
   try {
     await writeTextFile(tab.filePath, tab.content);
     markTabSaved(tab.id);
-    // 延迟清除标志位，确保文件监视的防抖延迟已过
+    // 保存完成后清除标志位和哈希（使用延迟确保文件监视的防抖延迟已过）
     setTimeout(() => {
-      isSavingFile = false;
+      fileWatchManager.setSaving(false, tab.filePath);
     }, SAVE_FLAG_CLEAR_DELAY_MS);
   } catch (error) {
-    isSavingFile = false;
+    fileWatchManager.setSaving(false, tab.filePath);
     throw error;
   }
 }
@@ -371,7 +412,7 @@ async function handleExportFormatSelect(format: ExportFormat) {
         });
 
         if (filePath) {
-          isSavingFile = true;
+          fileWatchManager.setSaving(true, filePath, tab.content);
           try {
             await writeTextFile(filePath, tab.content);
             tab.filePath = filePath;
@@ -379,10 +420,10 @@ async function handleExportFormatSelect(format: ExportFormat) {
             markTabSaved(tab.id);
             alert(`✅ Markdown 文件已保存到：\n${filePath}`);
             setTimeout(() => {
-              isSavingFile = false;
+              fileWatchManager.setSaving(false, filePath);
             }, SAVE_FLAG_CLEAR_DELAY_MS);
           } catch (error) {
-            isSavingFile = false;
+            fileWatchManager.setSaving(false, filePath);
             alert(`❌ 保存 Markdown 文件失败：${error}`);
             throw error;
           }
@@ -508,7 +549,7 @@ async function handleCloseTab(id: string) {
   const tab = tabs.find(t => t.id === id);
 
   // 如果标签页有未保存的修改，显示确认对话框
-  if (tab && tab.isDirty) {
+  if (tab && isTabDirty(tab)) {
     pendingCloseTabId.value = id;
     pendingCloseFileName.value = tab.fileName;
     showUnsavedChangesDialog.value = true;
@@ -552,7 +593,7 @@ async function handleUnsavedChangesChoice(choice: UserChoice) {
     case 'save':
       // 保存文件然后关闭标签页
       console.log('[App] Saving tab:', tab.fileName);
-      isSavingFile = true; // 标记正在保存
+      fileWatchManager.setSaving(true, tab.filePath, tab.content); // 标记正在保存
       try {
         if (tab.filePath && !tab.filePath.startsWith('untitled')) {
           await writeTextFile(tab.filePath, tab.content);
@@ -570,7 +611,7 @@ async function handleUnsavedChangesChoice(choice: UserChoice) {
           } else {
             // 用户取消了另存为，不关闭标签页
             console.log('[App] User cancelled save as');
-            isSavingFile = false;
+            fileWatchManager.setSaving(false, tab.filePath);
             showUnsavedChangesDialog.value = false;
             pendingCloseTabId.value = null;
             pendingCloseFileName.value = '';
@@ -579,10 +620,10 @@ async function handleUnsavedChangesChoice(choice: UserChoice) {
         }
         // 延迟清除标志位
         setTimeout(() => {
-          isSavingFile = false;
+          fileWatchManager.setSaving(false, tab.filePath);
         }, SAVE_FLAG_CLEAR_DELAY_MS);
       } catch (error) {
-        isSavingFile = false;
+        fileWatchManager.setSaving(false, tab.filePath);
         throw error;
       }
       closeTab(tabId);
@@ -622,7 +663,7 @@ function handleCloseRightTabs(id: string) {
 
 function handleCloseAllTabs() {
   // 检查是否有 dirty 标签页
-  const dirtyTabs = tabs.filter(t => t.isDirty);
+  const dirtyTabs = tabs.filter(t => isTabDirty(t));
   const dirtyCount = dirtyTabs.length;
 
   if (dirtyCount > 0) {
@@ -662,60 +703,128 @@ async function handleClickLink(href: string) {
   // 先解码 URL 编码的路径
   const decodedHref = decodeURI(href);
 
-  // 处理相对路径
+  // 识别路径类型
+  const pathType = identifyPath(decodedHref);
+
+  // 获取当前活动标签的路径
   const activeTabPath = activeTab.value?.filePath;
-  let fullPath = decodedHref;
 
-  if (activeTabPath && !decodedHref.match(/^[A-Za-z]:/) && !decodedHref.startsWith('/')) {
-    // 相对路径，转换为完整路径
-    fullPath = resolvePath(activeTabPath, href);
-    fullPath = decodeURI(fullPath);
-  }
-
-  // 尝试读取文件
   try {
-    const content = await readTextFile(fullPath);
+    let filePath: string;
+    let content: string;
+    let fileName: string;
 
-    // 调试日志
-    console.log('Opening link:', {
-      href: decodedHref,
-      activeTabPath,
-      fullPath,
-      contentLength: content.length,
-      contentPreview: content.substring(0, 100)
-    });
+    switch (pathType) {
+      case PathType.ASSET_URL: {
+        // asset.localhost URL：提取本地路径
+        const localPath = extractLocalPathFromAssetUrl(decodedHref);
+
+        console.log('[App] Converting asset.localhost URL to local path:', {
+          url: decodedHref,
+          localPath
+        });
+
+        filePath = localPath;
+        content = await readTextFile(filePath);
+        fileName = localPath.split(/[/\\]/).pop() || localPath;
+        break;
+      }
+
+      case PathType.LOCAL:
+      case PathType.RELATIVE: {
+        // 本地文件或相对路径：解析为绝对路径
+        let fullPath = decodedHref;
+        if (activeTabPath && !decodedHref.match(/^[A-Za-z]:/) && !decodedHref.startsWith('/')) {
+          fullPath = resolvePath(activeTabPath, href);
+          fullPath = decodeURI(fullPath);
+        }
+
+        filePath = fullPath;
+        content = await readTextFile(filePath);
+        fileName = fullPath.split(/[/\\]/).pop() || fullPath;
+        break;
+      }
+
+      case PathType.REMOTE_URL: {
+        // 真正的远程 URL：使用 fetch 下载
+        const response = await fetch(decodedHref);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        filePath = decodedHref; // 保存原始 URL 作为路径
+        content = await response.text();
+        fileName = decodedHref.split(/[/\\]/).pop() || decodedHref;
+        break;
+      }
+
+      default:
+        console.warn('[App] Unsupported path type for Markdown link:', pathType, 'href:', decodedHref);
+        return;
+    }
 
     // 检查是否已经打开
-    const existingTab = tabs.find(t => t.filePath === fullPath);
+    const existingTab = tabs.find(t => t.filePath === filePath);
     if (existingTab) {
       setActiveTab(existingTab.id);
       // 更新最近文件访问时间
-      addRecentFile(fullPath);
+      addRecentFile(filePath);
       return;
     }
 
     // 创建新标签
-    const separatorRegex = /[/\\]/;
-    const fileName = decodedHref.split(separatorRegex).pop() || decodedHref;
     const id = `tab-${Date.now()}`;
+    const newTab = createTabItem(id, filePath, content, false);
 
-    const newTab = {
-      id,
-      filePath: fullPath,
+    console.log('[App] Opening Markdown file:', {
+      pathType,
+      filePath,
       fileName,
-      content, // 存储原始内容
-      isDirty: false,
-    };
-
-    console.log('Creating new tab:', newTab);
+      contentLength: content.length
+    });
 
     tabs.push(newTab);
     activeTabId.value = id;
-    // 添加到最近文件
-    addRecentFile(fullPath);
+    addRecentFile(filePath);
   } catch (e) {
-    console.error('Failed to open link:', e, 'Path:', fullPath);
+    console.error('[App] Failed to open Markdown link:', e, {
+      href: decodedHref,
+      pathType
+    });
+
+    // 显示错误提示
+    const errorMsg = e?.toString() || '未知错误';
+    if (errorMsg.includes('os error 2') ||
+        errorMsg.includes('No such file') ||
+        errorMsg.includes('cannot find') ||
+        errorMsg.includes('系统找不到指定的文件')) {
+      errorDialogTitle.value = '文件不存在';
+      errorMessage.value = `无法打开链接指向的文件：\n\n${decodedHref}\n\n该文件可能已被删除或移动。`;
+    } else if (errorMsg.includes('HTTP')) {
+      errorDialogTitle.value = '网络错误';
+      errorMessage.value = `无法访问远程链接：\n\n${decodedHref}\n\n${errorMsg}`;
+    } else {
+      errorDialogTitle.value = '打开链接失败';
+      errorMessage.value = `无法打开链接：\n\n${decodedHref}\n\n${errorMsg}`;
+    }
+    showErrorDialog.value = true;
   }
+}
+
+// 处理锚点链接错误
+function handleAnchorError(anchorId: string) {
+  console.warn('[App] Anchor not found:', anchorId);
+  errorDialogTitle.value = '锚点不存在';
+  errorMessage.value = `文档中找不到名为 "${anchorId}" 的锚点。\n\n该锚点可能已被删除或链接有误。`;
+  showErrorDialog.value = true;
+}
+
+// 处理其他链接错误
+function handleLinkError(href: string, reason: string) {
+  console.warn('[App] Link error:', href, reason);
+  errorDialogTitle.value = '无效链接';
+  errorMessage.value = '这是一个无效或不支持的链接。\n\n请在 Markdown 文档中检查链接是否正确。';
+  showErrorDialog.value = true;
 }
 
 function handleToggleMode() {
@@ -726,80 +835,130 @@ function handleAbout() {
   showAbout.value = true;
 }
 
-// 开始监控当前活动文件
-async function startWatchingFile() {
-  // 停止之前的监控
-  stopWatchingFile();
-
-  const tab = activeTab.value;
-  if (!tab || !tab.filePath || tab.filePath.startsWith('untitled')) {
+/**
+ * 处理文件变化回调
+ * @param filePath 文件路径
+ * @param tabId 标签页 ID
+ */
+function handleFileChanged(filePath: string, tabId: string) {
+  const tab = tabs.find(t => t.filePath === filePath && t.id === tabId);
+  if (!tab) {
+    console.log('[App] Tab not found for file change:', filePath, 'tabId:', tabId);
     return;
   }
 
-  const filePath = tab.filePath;
+  // 根据当前状态决定新的状态
+  const newStatus = transitionOnExternalModify(tab.syncStatus);
 
-  try {
-    console.log('[App] Starting to watch file:', filePath);
-    unwatchFn = await watchFile(
-      filePath,
-      async (event) => {
-        console.log('[App] File changed:', event, filePath, 'isSavingFile:', isSavingFile);
+  // 更新状态
+  tab.syncStatus = newStatus;
 
-        // 如果是应用自己保存的，忽略此次变化
-        if (isSavingFile) {
-          console.log('[App] File change caused by self-save, ignoring');
-          return;
-        }
+  console.log('[App] File changed, status updated:', {
+    filePath,
+    tabId: tab.id,
+    oldStatus: tab.syncStatus,
+    newStatus,
+  });
 
-        // 动态查找当前文件对应的 tab（避免闭包捕获旧对象）
-        const currentTab = tabs.find(t => t.filePath === filePath);
-        if (!currentTab) {
-          console.log('[App] Tab not found, ignoring file change');
-          return;
-        }
-
-        // 无论是否有未保存的修改，都弹出对话框让用户确认
-        console.log('[App] Showing reload dialog for user confirmation');
-        pendingReloadFileName.value = currentTab.fileName;
-        pendingReloadFilePath.value = filePath;
-        pendingReloadHasUnsavedChanges.value = currentTab.isDirty;
-        showFileReloadDialog.value = true;
-      },
-      {
-        delayMs: FILE_WATCH_DEBOUNCE_MS,
-      }
-    );
-  } catch (error) {
-    console.error('[App] Failed to watch file:', error);
+  // 如果是当前活动标签，立即显示对话框
+  if (tab.id === activeTabId.value) {
+    showReloadDialog(tab);
+  } else {
+    // 非活动标签，记录到待处理列表
+    pendingReloadTabs.value.add(tab.id);
+    console.log('[App] Tab not active, added to pending list:', tab.id);
   }
 }
 
-// 停止监控文件
-function stopWatchingFile() {
-  if (unwatchFn) {
-    try {
-      unwatchFn();
-      console.log('[App] Stopped watching file');
-    } catch (error) {
-      console.error('[App] Error stopping watch:', error);
-    }
-    unwatchFn = null;
+/**
+ * 显示重新加载对话框
+ */
+function showReloadDialog(tab: TabItem) {
+  pendingReloadFileName.value = tab.fileName;
+  pendingReloadFilePath.value = tab.filePath;
+  pendingReloadHasUnsavedChanges.value = isTabDirty(tab);
+  showFileReloadDialog.value = true;
+}
+
+/**
+ * 为标签页启动监控
+ */
+async function startWatchForTab(tab: { id: string; filePath: string; fileName: string; syncStatus: FileSyncStatus }): Promise<void> {
+  if (!tab.filePath) return;
+
+  const success = await fileWatchManager.startWatch(
+    tab as any, // FileWatchManager 需要 TabItem，这里传入兼容的对象
+    handleFileChanged
+  );
+
+  if (success) {
+    console.log('[App] Started watch for tab:', tab.id, tab.filePath);
   }
+}
+
+/**
+ * 停止标签页的监控
+ */
+function stopWatchForTab(tabId: string): void {
+  fileWatchManager.stopWatchByTabId(tabId);
+  console.log('[App] Stopped watch for tab:', tabId);
 }
 
 // 重新加载文件内容
 async function reloadFile(filePath: string) {
   try {
-    const content = await readTextFile(filePath);
+    let content: string;
+
+    // 根据文件路径类型选择不同的加载方式
+    if (/^https?:\/\//.test(filePath)) {
+      // 远程 URL：使用 fetch
+      const response = await fetch(filePath);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      content = await response.text();
+    } else {
+      // 本地文件：使用 readTextFile
+      content = await readTextFile(filePath);
+    }
+
     const tab = tabs.find(t => t.filePath === filePath);
 
     if (tab) {
       tab.content = content; // 存储原始内容
-      tab.isDirty = false;
+      // 重新加载后，状态变为已同步
+      tab.syncStatus = FileSyncStatus.SYNCED;
+      tab.lastSyncedModified = Date.now();
       console.log('[App] File reloaded successfully');
     }
   } catch (error) {
     console.error('[App] Failed to reload file:', error);
+
+    // 检查是否是文件删除错误（本地文件）
+    if (!/^https?:\/\//.test(filePath)) {
+      const errorMessage = error?.toString() || '';
+      // 检测常见的文件删除错误模式
+      if (errorMessage.includes('os error 2') || // 文件不存在
+          errorMessage.includes('No such file') ||
+          errorMessage.includes('cannot find') ||
+          errorMessage.includes('系统找不到指定的文件')) {
+        console.log('[App] File has been deleted, showing dialog');
+
+        // 查找对应的标签页
+        const tab = tabs.find(t => t.filePath === filePath);
+        if (tab) {
+          // 显示文件删除对话框
+          pendingDeletedFileName.value = tab.fileName;
+          pendingDeletedFilePath.value = filePath;
+          pendingDeletedHasUnsavedChanges.value = isTabDirty(tab);
+          showFileDeletedDialog.value = true;
+        }
+        return;
+      }
+    }
+
+    // 其他错误，显示通用错误提示
+    alert(`重新加载文件失败：\n${error}`);
   }
 }
 
@@ -816,20 +975,19 @@ function handleIgnoreFileChange() {
   showFileReloadDialog.value = false;
 }
 
-// 监听活动标签变化，切换文件监控
-watch(activeTab, () => {
-  startWatchingFile();
-});
+// 处理文件删除对话框的"保留"操作
+function handleKeepDeletedFile() {
+  showFileDeletedDialog.value = false;
+}
 
-// 监听标签页关闭，确保清理监控
-watch(
-  () => tabs.length,
-  () => {
-    if (!activeTab.value) {
-      stopWatchingFile();
-    }
+// 处理文件删除对话框的"关闭"操作
+function handleCloseDeletedFile() {
+  const tab = tabs.find(t => t.filePath === pendingDeletedFilePath.value);
+  if (tab) {
+    closeTab(tab.id);
   }
-);
+  showFileDeletedDialog.value = false;
+}
 
 // 处理全局键盘快捷键
 const handleKeyDown = (event: KeyboardEvent) => {
@@ -856,7 +1014,6 @@ const handleKeyDown = (event: KeyboardEvent) => {
 function handleOpenRecentFile(event: Event) {
   const customEvent = event as CustomEvent<{ filePath: string; content: string }>;
   const { filePath, content } = customEvent.detail;
-  const fileName = filePath.split(/[/\\]/).pop() || filePath;
 
   // 检查是否已经打开该文件
   const existingTab = tabs.find(t => t.filePath === filePath);
@@ -868,50 +1025,181 @@ function handleOpenRecentFile(event: Event) {
 
   // 创建新标签
   const id = `tab-${Date.now()}`;
-  tabs.push({
-    id,
-    filePath,
-    fileName,
-    content,
-    isDirty: false,
-  });
+  const newTab = createTabItem(id, filePath, content, false);
+  tabs.push(newTab);
   activeTabId.value = id;
   console.log('[App] Recent file opened successfully');
 }
 
-// 卸载前移除键盘事件监听
+// 处理侧边栏文件打开事件
+async function handleSidebarOpenFile(event: Event) {
+  const customEvent = event as CustomEvent<{ filePath: string }>;
+  const { filePath } = customEvent.detail;
+
+  try {
+    const content = await readTextFile(filePath);
+
+    // 检查是否已经打开该文件
+    const existingTab = tabs.find(t => t.filePath === filePath);
+    if (existingTab) {
+      setActiveTab(existingTab.id);
+      addRecentFile(filePath);
+      return;
+    }
+
+    // 创建新标签
+    const id = `tab-${Date.now()}`;
+    const newTab = createTabItem(id, filePath, content, false);
+    tabs.push(newTab);
+    activeTabId.value = id;
+    addRecentFile(filePath);
+    console.log('[App] Sidebar file opened successfully:', filePath);
+  } catch (error) {
+    console.error('[App] Failed to open file from sidebar:', error);
+    errorDialogTitle.value = '打开文件失败';
+    errorMessage.value = `无法打开文件：\n\n${filePath}\n\n${error}`;
+    showErrorDialog.value = true;
+  }
+}
+
+// 处理侧边栏文件夹打开事件
+async function handleSidebarOpenFolder() {
+  try {
+    const folderPath = await openDialog({
+      directory: true,
+      title: '选择文件夹',
+    });
+
+    if (folderPath) {
+      await openFolder(folderPath as string);
+      console.log('[App] Folder opened from sidebar:', folderPath);
+    }
+  } catch (error) {
+    console.error('[App] Failed to open folder:', error);
+    errorDialogTitle.value = '打开文件夹失败';
+    errorMessage.value = `无法打开文件夹：\n\n${error}`;
+    showErrorDialog.value = true;
+  }
+}
+
+// === 监控管理 ===
+
+// 监听 tabs 数组变化，自动启动/停止监控
+watch(
+  () => tabs.map(t => ({ id: t.id, filePath: t.filePath })),
+  async (newTabs, oldTabs) => {
+    if (!oldTabs) {
+      // 首次加载，为所有标签启动监控
+      console.log('[App] Initial load, starting watches for all tabs');
+      for (const { id } of newTabs) {
+        const tab = tabs.find(t => t.id === id);
+        if (tab) {
+          await startWatchForTab(tab);
+        }
+      }
+      return;
+    }
+
+    // 检测新增的标签
+    const added = newTabs.filter(newTab =>
+      !oldTabs.some(oldTab => oldTab.id === newTab.id)
+    );
+
+    for (const { id } of added) {
+      const tab = tabs.find(t => t.id === id);
+      if (tab) {
+        await startWatchForTab(tab);
+      }
+    }
+
+    // 检测移除的标签
+    const removed = oldTabs.filter(oldTab =>
+      !newTabs.some(newTab => newTab.id === oldTab.id)
+    );
+
+    for (const { id } of removed) {
+      stopWatchForTab(id);
+    }
+  },
+  { deep: true }
+);
+
+// 监听活动标签变化
+watch(activeTabId, (newId, _oldId) => {
+  if (!newId) return;
+
+  // 如果有待处理的待加载标签
+  if (pendingReloadTabs.value.has(newId)) {
+    // 先从待处理列表移除，避免重复处理
+    pendingReloadTabs.value.delete(newId);
+
+    // 检查 tab 是否仍然存在
+    const tab = tabs.find(t => t.id === newId);
+    if (tab && (tab.syncStatus === FileSyncStatus.EXTERNALLY_MODIFIED ||
+                tab.syncStatus === FileSyncStatus.CONFLICT)) {
+      showReloadDialog(tab);
+    }
+  }
+});
+
+// 监听标签页关闭，确保清理监控
+watch(
+  () => tabs.length,
+  (_newLength, _oldLength) => {
+    if (!activeTab.value) {
+      console.log('[App] No active tab, clearing pending reload tabs');
+      pendingReloadTabs.value.clear();
+    }
+  }
+);
+
+// 卸载前移除键盘事件监听和清理监控
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeyDown);
   window.removeEventListener('open-recent-file', handleOpenRecentFile);
+  window.removeEventListener('sidebar-open-file', handleSidebarOpenFile);
+  window.removeEventListener('sidebar-open-folder', handleSidebarOpenFolder);
+  // 停止所有文件监控
+  fileWatchManager.stopAll();
+  console.log('[App] All file watches stopped on unmount');
 });
 </script>
 
 <template>
   <div class="app">
-    <Toolbar @new="handleNew" @open="handleOpen" @save="handleSave" @save-as="handleSaveAs" @toggle-mode="handleToggleMode" @about="handleAbout" />
-    <TabBar
-      :tabs="tabs"
-      :active-tab-id="activeTabId"
-      @close="handleCloseTab"
-      @select="handleSelectTab"
-      @close-left="handleCloseLeftTabs"
-      @close-right="handleCloseRightTabs"
-      @close-all="handleCloseAllTabs"
-    />
-    <div class="editor-container">
-      <CherryEditor
-        v-if="activeTab"
-        ref="cherryEditorRef"
-        :tab="activeTab"
-        @update:content="handleContentChange"
-        @click-link="handleClickLink"
-        @save="handleSave"
+    <!-- 侧边栏 -->
+    <Sidebar />
+
+    <!-- 主内容区域 -->
+    <div class="main-content">
+      <Toolbar @new="handleNew" @open="handleOpen" @open-folder="handleOpenFolderFromToolbar" @save="handleSave" @save-as="handleSaveAs" @toggle-mode="handleToggleMode" @about="handleAbout" />
+      <TabBar
+        :tabs="tabs"
+        :active-tab-id="activeTabId"
+        @close="handleCloseTab"
+        @select="handleSelectTab"
+        @close-left="handleCloseLeftTabs"
+        @close-right="handleCloseRightTabs"
+        @close-all="handleCloseAllTabs"
       />
-      <div v-else class="empty-state">
-        <p>打开一个 Markdown 文件开始编辑</p>
-        <p class="hint">点击工具栏的"打开"按钮或按 Ctrl+O</p>
+      <div class="editor-container">
+        <CherryEditor
+          v-if="activeTab"
+          ref="cherryEditorRef"
+          :tab="activeTab"
+          @update:content="handleContentChange"
+          @click-link="handleClickLink"
+          @save="handleSave"
+          @anchor-error="handleAnchorError"
+          @link-error="handleLinkError"
+        />
+        <div v-else class="empty-state">
+          <p>打开一个 Markdown 文件开始编辑</p>
+          <p class="hint">点击工具栏的"打开"按钮或按 Ctrl+O</p>
+        </div>
       </div>
     </div>
+
     <AboutDialog :visible="showAbout" @close="showAbout = false" />
     <LoadingDialog :visible="showLoadingDialog" :message="loadingMessage" />
     <ExportFormatDialog
@@ -926,6 +1214,14 @@ onBeforeUnmount(() => {
       @reload="handleReloadFromFile"
       @ignore="handleIgnoreFileChange"
     />
+    <FileDeletedDialog
+      :visible="showFileDeletedDialog"
+      :file-name="pendingDeletedFileName"
+      :file-path="pendingDeletedFilePath"
+      :has-unsaved-changes="pendingDeletedHasUnsavedChanges"
+      @keep="handleKeepDeletedFile"
+      @close="handleCloseDeletedFile"
+    />
     <UnsavedChangesDialog
       :visible="showUnsavedChangesDialog"
       :file-name="pendingCloseFileName"
@@ -938,6 +1234,12 @@ onBeforeUnmount(() => {
       confirm-text="确定"
       cancel-text="取消"
       @choice="handleCloseAllConfirmChoice"
+    />
+    <ErrorDialog
+      :visible="showErrorDialog"
+      :title="errorDialogTitle"
+      :message="errorMessage"
+      @close="showErrorDialog = false"
     />
   </div>
 </template>
@@ -957,10 +1259,18 @@ html, body, #app {
 
 .app {
   display: flex;
-  flex-direction: column;
   width: 100%;
   height: 100%;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.main-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 .editor-container {
@@ -997,6 +1307,10 @@ html, body, #app {
 html.dark .app {
   background-color: #1e1e1e;
   color: #d4d4d4;
+}
+
+html.dark .main-content {
+  background-color: #1e1e1e;
 }
 
 html.dark .editor-container {
