@@ -2,6 +2,7 @@
 import { computed } from 'vue';
 import { toggleTreeNode, type FileTreeNode as IFileTreeNode } from '../../stores/sidebarStore';
 import { tabs, activeTabId, setActiveTab } from '../../stores/tabStore';
+import { normalizePathSeparator, formatFileSize, formatModifiedTime } from '../../utils/pathUtils';
 
 const props = defineProps<{
   node: IFileTreeNode;
@@ -25,6 +26,17 @@ const isOpened = computed(() => {
 const isActive = computed(() => {
   const activeTab = tabs.find(t => t.id === activeTabId.value);
   return activeTab?.filePath === props.node.path;
+});
+
+// 格式化 tooltip：路径 + 修改时间 + 文件大小
+const tooltipText = computed(() => {
+  const parts: string[] = [normalizePathSeparator(props.node.path)];
+  const mtime = formatModifiedTime(props.node.modifiedTime);
+  if (mtime) parts.push(mtime);
+  if (!props.node.isDirectory && props.node.fileSize != null) {
+    parts.push(formatFileSize(props.node.fileSize));
+  }
+  return parts.join('\n');
 });
 
 // 处理节点点击
@@ -68,7 +80,7 @@ function handleFileOpen() {
       }"
       :style="indentStyle"
       @click="handleClick"
-      :title="node.path"
+      :title="tooltipText"
     >
       <!-- 展开/折叠箭头（目录） -->
       <span v-if="node.isDirectory" class="expand-arrow">

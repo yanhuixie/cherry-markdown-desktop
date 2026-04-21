@@ -57,7 +57,7 @@ function handleFileClick(tab: TabItem) {
     </div>
 
     <!-- 文件列表 -->
-    <div class="file-list">
+    <div class="file-list custom-scrollbar">
       <div v-if="openedFiles.length === 0" class="empty-state">
         <p>暂无打开的文件</p>
         <p class="hint">点击工具栏的"打开"按钮</p>

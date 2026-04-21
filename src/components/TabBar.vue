@@ -17,6 +17,20 @@ const emit = defineEmits<{
   (e: 'close-all'): void;
 }>();
 
+// 标签栏 DOM 引用
+const tabBarRef = ref<HTMLElement | null>(null);
+
+// 鼠标滚轮横向滚动
+function handleWheel(event: WheelEvent) {
+  if (tabBarRef.value) {
+    const el = tabBarRef.value;
+    if (el.scrollWidth > el.clientWidth) {
+      event.preventDefault();
+      el.scrollLeft += event.deltaY;
+    }
+  }
+}
+
 // 右键菜单状态
 const contextMenu = ref({
   visible: false,
@@ -127,7 +141,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="tab-bar">
+  <div ref="tabBarRef" class="tab-bar custom-scrollbar" @wheel="handleWheel">
     <div
       v-for="(tab, index) in tabs"
       :key="tab.id"

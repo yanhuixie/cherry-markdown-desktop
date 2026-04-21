@@ -325,7 +325,8 @@ const initEditor = async () => {
           const href = anchor.getAttribute('href');
           if (href) {
             // 处理 Markdown 文件链接
-            if (href.endsWith('.md') || href.endsWith('.markdown')) {
+            if (href.endsWith('.md') || href.endsWith('.markdown')
+              || href.endsWith('.html') || href.endsWith('.htm')) {
               e.preventDefault();
               e.stopPropagation();
               emit('click-link', href);
@@ -391,9 +392,9 @@ const initEditor = async () => {
               const localPath = extractLocalPathFromAssetUrl(href);
 
               // 检查是否为 Markdown 文件
-              if (localPath.endsWith('.md') || localPath.endsWith('.markdown')) {
-                // Markdown 文件：触发 click-link 事件，由 App.vue 处理打开
-                console.log('[CherryEditor] Asset URL Markdown link:', localPath);
+              if (localPath.endsWith('.md') || localPath.endsWith('.markdown')
+                || localPath.endsWith('.html') || localPath.endsWith('.htm')) {
+                console.log('[CherryEditor] Asset URL link:', localPath);
                 emit('click-link', localPath);
               } else {
                 // 非 Markdown 文件：拦截并提示错误

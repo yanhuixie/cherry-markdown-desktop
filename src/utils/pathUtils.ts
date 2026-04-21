@@ -191,3 +191,27 @@ export function splitPath(path: string): string[] {
 export function getFileName(path: string): string {
   return splitPath(path).pop() || path;
 }
+
+/**
+ * 格式化文件大小为人类可读格式
+ * @param bytes 文件大小（字节数）
+ * @returns 格式化后的字符串（如 "1.5 MB"、"256 KB"）
+ */
+export function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+/**
+ * 格式化时间戳为人类可读格式
+ * @param mtime 毫秒时间戳（Tauri DirEntry.mtime）
+ * @returns 格式化后的字符串（如 "2026-04-21 15:30"）
+ */
+export function formatModifiedTime(mtime: number | null): string {
+  if (mtime == null) return '';
+  const d = new Date(mtime);
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}

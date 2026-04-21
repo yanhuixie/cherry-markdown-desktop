@@ -4,12 +4,13 @@ import { readTextFile, writeTextFile, writeFile } from '@tauri-apps/plugin-fs';
 import { open as openDialog, save } from '@tauri-apps/plugin-dialog';
 import { invoke } from './utils/tauriInvoke'; // 使用带错误拦截的 invoke 包装器
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { tabs, activeTabId, closeTab, closeLeftTabs, closeRightTabs, closeAllTabs, setActiveTab, updateTabContent, markTabSaved, addRecentFile, createTabItem, isTabDirty, type TabItem } from './stores/tabStore';
+import { tabs, activeTabId, closeTab, closeLeftTabs, closeRightTabs, closeAllTabs, setActiveTab, updateTabContent, markTabSaved, addRecentFile, addRecentFolder, createTabItem, isTabDirty, isHtmlTab, type TabItem } from './stores/tabStore';
 import { fileWatchManager } from './stores/fileWatchManager';
 import { FileSyncStatus, transitionOnExternalModify } from './stores/fileSyncStatus';
 import TabBar from './components/TabBar.vue';
 import Toolbar from './components/Toolbar.vue';
 import CherryEditor from './components/CherryEditor.vue';
+import HtmlPreview from './components/HtmlPreview.vue';
 import AboutDialog from './components/AboutDialog.vue';
 import FileReloadDialog from './components/FileReloadDialog.vue';
 import FileDeletedDialog from './components/FileDeletedDialog.vue';
@@ -25,7 +26,8 @@ import {
   resolvePath,
   identifyPath,
   PathType,
-  extractLocalPathFromAssetUrl
+  extractLocalPathFromAssetUrl,
+  isAssetLocalhostUrl
 } from './utils/pathUtils';
 
 // 文件监视相关常量
@@ -260,7 +262,9 @@ onMounted(async () => {
 async function openFileFromPath(filePath: string) {
   try {
     console.log('[App] Opening file:', filePath);
-    const content = await readTextFile(filePath);
+    const lowerPath = filePath.toLowerCase();
+    const isHtml = lowerPath.endsWith('.html') || lowerPath.endsWith('.htm');
+    const content = isHtml ? '' : await readTextFile(filePath);
 
     // 检查是否已经打开该文件
     const existingTab = tabs.find(t => t.filePath === filePath);
@@ -316,11 +320,16 @@ function handleNew() {
 async function handleOpen() {
   const filePath = await openDialog({
     multiple: false,
-    filters: [{ name: 'Markdown', extensions: ['md', 'markdown'] }],
+    filters: [
+      { name: 'Markdown', extensions: ['md', 'markdown'] },
+      { name: 'HTML', extensions: ['html', 'htm'] },
+    ],
   });
 
   if (filePath) {
-    const content = await readTextFile(filePath);
+    const lowerPath = filePath.toLowerCase();
+    const isHtml = lowerPath.endsWith('.html') || lowerPath.endsWith('.htm');
+    const content = isHtml ? '' : await readTextFile(filePath);
 
     // 检查是否已经打开该文件
     const existingTab = tabs.find(t => t.filePath === filePath);
@@ -353,6 +362,7 @@ async function handleOpenFolderFromToolbar() {
       await openFolder(folderPath as string);
       // 切换到文件夹浏览器标签
       sidebarState.activeTab = 'fileExplorer';
+      addRecentFolder(folderPath as string);
       console.log('[App] Folder opened from toolbar:', folderPath);
     }
   } catch (error) {
@@ -366,6 +376,7 @@ async function handleOpenFolderFromToolbar() {
 async function handleSave() {
   const tab = activeTab.value;
   if (!tab) return;
+  if (isHtmlTab(tab)) return;
 
   // 远程 URL 文件、untitled 文件需要执行"另存为"
   if (!tab.filePath || tab.filePath.startsWith('untitled') || /^https?:\/\//.test(tab.filePath)) {
@@ -391,8 +402,8 @@ async function handleSave() {
 async function handleSaveAs() {
   const tab = activeTab.value;
   if (!tab) return;
+  if (isHtmlTab(tab)) return;
 
-  // 显示导出格式选择对话框
   showExportFormatDialog.value = true;
 }
 
@@ -400,6 +411,7 @@ async function handleSaveAs() {
 async function handleExportFormatSelect(format: ExportFormat) {
   const tab = activeTab.value;
   if (!tab || !cherryEditorRef.value) return;
+  if (isHtmlTab(tab)) return;
 
   console.log('[App] Export format selected:', format);
 
@@ -691,16 +703,30 @@ function handleContentChange(content: string) {
   }
 }
 
-function isMarkdownLink(href: string): boolean {
-  return href.endsWith('.md') || href.endsWith('.markdown');
+function isSupportedLink(href: string): boolean {
+  return href.endsWith('.md') || href.endsWith('.markdown')
+    || href.endsWith('.html') || href.endsWith('.htm');
 }
 
 async function handleClickLink(href: string) {
-  if (!isMarkdownLink(href)) {
+  if (!isSupportedLink(href)) {
     return;
   }
 
-  // 先解码 URL 编码的路径
+  const isHtml = href.toLowerCase().endsWith('.html') || href.toLowerCase().endsWith('.htm');
+
+  if (isHtml) {
+    if (/^https?:\/\//i.test(href) && !isAssetLocalhostUrl(href)) {
+      try {
+        const { openUrl } = await import('@tauri-apps/plugin-opener');
+        await openUrl(href);
+      } catch (e) {
+        console.error('[App] Failed to open remote HTML URL:', e);
+      }
+      return;
+    }
+  }
+
   const decodedHref = decodeURI(href);
 
   // 识别路径类型
@@ -725,14 +751,13 @@ async function handleClickLink(href: string) {
         });
 
         filePath = localPath;
-        content = await readTextFile(filePath);
+        content = isHtml ? '' : await readTextFile(filePath);
         fileName = localPath.split(/[/\\]/).pop() || localPath;
         break;
       }
 
       case PathType.LOCAL:
       case PathType.RELATIVE: {
-        // 本地文件或相对路径：解析为绝对路径
         let fullPath = decodedHref;
         if (activeTabPath && !decodedHref.match(/^[A-Za-z]:/) && !decodedHref.startsWith('/')) {
           fullPath = resolvePath(activeTabPath, href);
@@ -740,26 +765,35 @@ async function handleClickLink(href: string) {
         }
 
         filePath = fullPath;
-        content = await readTextFile(filePath);
+        content = isHtml ? '' : await readTextFile(filePath);
         fileName = fullPath.split(/[/\\]/).pop() || fullPath;
         break;
       }
 
       case PathType.REMOTE_URL: {
-        // 真正的远程 URL：使用 fetch 下载
+        if (isHtml) {
+          try {
+            const { openUrl } = await import('@tauri-apps/plugin-opener');
+            await openUrl(decodedHref);
+          } catch (e) {
+            console.error('[App] Failed to open remote HTML URL:', e);
+          }
+          return;
+        }
+
         const response = await fetch(decodedHref);
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
 
-        filePath = decodedHref; // 保存原始 URL 作为路径
+        filePath = decodedHref;
         content = await response.text();
         fileName = decodedHref.split(/[/\\]/).pop() || decodedHref;
         break;
       }
 
       default:
-        console.warn('[App] Unsupported path type for Markdown link:', pathType, 'href:', decodedHref);
+        console.warn('[App] Unsupported path type for link:', pathType, 'href:', decodedHref);
         return;
     }
 
@@ -828,6 +862,8 @@ function handleLinkError(href: string, reason: string) {
 }
 
 function handleToggleMode() {
+  const tab = activeTab.value;
+  if (tab && isHtmlTab(tab)) return;
   cherryEditorRef.value?.toggleMode();
 }
 
@@ -844,6 +880,12 @@ function handleFileChanged(filePath: string, tabId: string) {
   const tab = tabs.find(t => t.filePath === filePath && t.id === tabId);
   if (!tab) {
     console.log('[App] Tab not found for file change:', filePath, 'tabId:', tabId);
+    return;
+  }
+
+  if (isHtmlTab(tab)) {
+    tab.fileLastModified = Date.now();
+    console.log('[App] HTML file changed, updated fileLastModified for iframe refresh');
     return;
   }
 
@@ -1037,7 +1079,9 @@ async function handleSidebarOpenFile(event: Event) {
   const { filePath } = customEvent.detail;
 
   try {
-    const content = await readTextFile(filePath);
+    const lowerPath = filePath.toLowerCase();
+    const isHtml = lowerPath.endsWith('.html') || lowerPath.endsWith('.htm');
+    const content = isHtml ? '' : await readTextFile(filePath);
 
     // 检查是否已经打开该文件
     const existingTab = tabs.find(t => t.filePath === filePath);
@@ -1172,7 +1216,7 @@ onBeforeUnmount(() => {
 
     <!-- 主内容区域 -->
     <div class="main-content">
-      <Toolbar @new="handleNew" @open="handleOpen" @open-folder="handleOpenFolderFromToolbar" @save="handleSave" @save-as="handleSaveAs" @toggle-mode="handleToggleMode" @about="handleAbout" />
+      <Toolbar @new="handleNew" @open="handleOpen" @open-folder="handleOpenFolderFromToolbar" @save="handleSave" @save-as="handleSaveAs" @toggle-mode="handleToggleMode" @about="handleAbout" :is-html-active="activeTab?.fileType === 'html'" />
       <TabBar
         :tabs="tabs"
         :active-tab-id="activeTabId"
@@ -1184,7 +1228,7 @@ onBeforeUnmount(() => {
       />
       <div class="editor-container">
         <CherryEditor
-          v-if="activeTab"
+          v-if="activeTab && activeTab.fileType === 'markdown'"
           ref="cherryEditorRef"
           :tab="activeTab"
           @update:content="handleContentChange"
@@ -1192,6 +1236,10 @@ onBeforeUnmount(() => {
           @save="handleSave"
           @anchor-error="handleAnchorError"
           @link-error="handleLinkError"
+        />
+        <HtmlPreview
+          v-else-if="activeTab && activeTab.fileType === 'html'"
+          :tab="activeTab"
         />
         <div v-else class="empty-state">
           <p>打开一个 Markdown 文件开始编辑</p>

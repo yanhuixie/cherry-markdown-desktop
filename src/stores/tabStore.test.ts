@@ -13,6 +13,14 @@ import {
   closeRightTabs,
   closeAllTabs,
   TabItem,
+  recentFiles,
+  recentFolders,
+  addRecentFile,
+  addRecentFolder,
+  removeRecentFile,
+  removeRecentFolder,
+  clearRecentFiles,
+  clearRecentFolders,
 } from './tabStore';
 import { FileSyncStatus } from './fileSyncStatus';
 
@@ -312,6 +320,117 @@ describe('tabStore', () => {
       closeAllTabs();
       expect(tabs.length).toBe(0);
       expect(activeTabId.value).toBeNull();
+    });
+  });
+
+  describe('最近文件夹', () => {
+    beforeEach(() => {
+      recentFolders.splice(0, recentFolders.length);
+    });
+
+    it('应添加文件夹到最近列表', () => {
+      addRecentFolder('D:\\projects\\myapp');
+      expect(recentFolders.length).toBe(1);
+      expect(recentFolders[0].name).toBe('myapp');
+      expect(recentFolders[0].path).toBe('D:/projects/myapp');
+    });
+
+    it('应规范化文件夹路径为正斜杠', () => {
+      addRecentFolder('D:\\projects\\myapp');
+      expect(recentFolders[0].path).toBe('D:/projects/myapp');
+    });
+
+    it('应去重不同分隔符的同一路径', () => {
+      addRecentFolder('D:/projects/myapp');
+      const firstAccessed = recentFolders[0].lastAccessed;
+      // 稍等确保时间戳不同
+      addRecentFolder('D:\\projects\\myapp');
+      expect(recentFolders.length).toBe(1);
+      expect(recentFolders[0].lastAccessed).toBeGreaterThanOrEqual(firstAccessed);
+    });
+
+    it('应限制最多20条记录', () => {
+      for (let i = 0; i < 21; i++) {
+        addRecentFolder(`D:\\projects\\folder${i}`);
+      }
+      // saveRecentFoldersToStorage 限制存储为 20 条
+      const stored = localStorageMock.getItem('cherry_markdown_recent_folders');
+      expect(stored).not.toBeNull();
+      const parsed = JSON.parse(stored!);
+      expect(parsed.length).toBe(20);
+      // 验证存储中包含了最新的记录（21个中保留了20个）
+      const names = parsed.map((f: { name: string }) => f.name);
+      expect(names.length).toBe(20);
+    });
+
+    it('应删除指定文件夹', () => {
+      addRecentFolder('D:\\projects\\folderA');
+      addRecentFolder('D:\\projects\\folderB');
+      expect(recentFolders.length).toBe(2);
+      removeRecentFolder('D:/projects/folderA');
+      expect(recentFolders.length).toBe(1);
+      expect(recentFolders[0].name).toBe('folderB');
+    });
+
+    it('应清空所有文件夹', () => {
+      addRecentFolder('D:\\projects\\folderA');
+      addRecentFolder('D:\\projects\\folderB');
+      clearRecentFolders();
+      expect(recentFolders.length).toBe(0);
+    });
+  });
+
+  describe('路径规范化', () => {
+    beforeEach(() => {
+      recentFiles.splice(0, recentFiles.length);
+    });
+
+    it('addRecentFile 应规范化混合分隔符路径', () => {
+      addRecentFile('D:\\docs/designs/file.md');
+      expect(recentFiles[0].path).toBe('D:/docs/designs/file.md');
+    });
+
+    it('addRecentFile 应对已规范化的路径幂等', () => {
+      addRecentFile('D:/path/file.md');
+      expect(recentFiles[0].path).toBe('D:/path/file.md');
+    });
+
+    it('addRecentFile 应通过规范化路径正确去重', () => {
+      addRecentFile('D:/projects/test.md');
+      addRecentFile('D:\\projects\\test.md');
+      expect(recentFiles.length).toBe(1);
+    });
+  });
+
+  describe('数据迁移', () => {
+    it('addRecentFile 应规范化存储中的路径', () => {
+      // 通过 addRecentFile 写入混合分隔符路径，验证存储结果被规范化
+      recentFiles.splice(0, recentFiles.length);
+      addRecentFile('D:\\mixed/path/file.md');
+      const stored = localStorageMock.getItem('cherry_markdown_recent_files');
+      expect(stored).not.toBeNull();
+      const parsed = JSON.parse(stored!);
+      expect(parsed[0].path).toBe('D:/mixed/path/file.md');
+    });
+  });
+
+  describe('边界情况', () => {
+    beforeEach(() => {
+      recentFolders.splice(0, recentFolders.length);
+    });
+
+    it('应处理根路径', () => {
+      addRecentFolder('C:\\');
+      expect(recentFolders[0].name).not.toBe('');
+    });
+
+    it('localStorage 读写失败不应崩溃', () => {
+      const originalSetItem = localStorageMock.setItem;
+      localStorageMock.setItem = () => { throw new Error('localStorage full'); };
+      expect(() => {
+        addRecentFolder('D:\\projects\\myapp');
+      }).not.toThrow();
+      localStorageMock.setItem = originalSetItem;
     });
   });
 });

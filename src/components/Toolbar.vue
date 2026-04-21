@@ -4,7 +4,8 @@ import { useTheme } from '../composables/useTheme';
 import { useFontSize } from '../composables/useFontSize';
 import { useFontFamily } from '../composables/useFontFamily';
 import { useCodeBlock } from '../composables/useCodeBlock';
-import { recentFiles, removeRecentFile } from '../stores/tabStore';
+import { recentFiles, removeRecentFile, recentFolders, removeRecentFolder } from '../stores/tabStore';
+import { openFolder, sidebarState } from '../stores/sidebarStore';
 import RecentFileErrorDialog from './RecentFileErrorDialog.vue';
 import type { RecentFileErrorChoice } from './RecentFileErrorDialog.vue';
 
@@ -18,6 +19,10 @@ const emit = defineEmits<{
   (e: 'about'): void;
 }>();
 
+defineProps<{
+  isHtmlActive?: boolean;
+}>();
+
 const { isDark, toggleTheme } = useTheme();
 const { currentFontSize, setFontSize, FONT_SIZE_CONFIGS } = useFontSize();
 const { isMonospace, setFontFamily, initFontFamily } = useFontFamily();
@@ -26,6 +31,8 @@ const { allCodeExpanded, toggleCodeBlock } = useCodeBlock();
 // 最近文件下拉菜单状态
 const showRecentMenu = ref(false);
 const recentMenuButton = ref<HTMLButtonElement | null>(null);
+const recentMenuContainer = ref<HTMLDivElement | null>(null);
+const activeRecentTab = ref<'files' | 'folders'>('files');
 
 // 打开按钮下拉菜单状态
 const showOpenMenu = ref(false);
@@ -40,6 +47,7 @@ function toggleRecentMenu() {
   showRecentMenu.value = !showRecentMenu.value;
   // 关闭其他菜单
   if (showRecentMenu.value) {
+    activeRecentTab.value = 'files';
     showOpenMenu.value = false;
     showFontPanel.value = false;
   }
@@ -115,6 +123,19 @@ async function openRecentFile(filePath: string) {
 const showRecentFileError = ref(false);
 const errorFilePath = ref('');
 
+// 打开最近文件夹
+async function openRecentFolder(folderPath: string) {
+  try {
+    await openFolder(folderPath);
+    sidebarState.activeTab = 'fileExplorer';
+    showRecentMenu.value = false;
+  } catch (error) {
+    console.error('[Toolbar] 打开最近文件夹失败:', error);
+    removeRecentFolder(folderPath);
+    showRecentMenu.value = false;
+  }
+}
+
 // 处理错误对话框的用户选择
 function handleRecentFileErrorChoice(choice: RecentFileErrorChoice) {
   if (choice === 'remove') {
@@ -127,7 +148,7 @@ function handleRecentFileErrorChoice(choice: RecentFileErrorChoice) {
 
 // 点击外部关闭菜单
 function handleClickOutside(event: MouseEvent) {
-  if (recentMenuButton.value && !recentMenuButton.value.contains(event.target as Node)) {
+  if (recentMenuContainer.value && !recentMenuContainer.value.contains(event.target as Node)) {
     showRecentMenu.value = false;
   }
   if (openMenuButton.value && !openMenuButton.value.contains(event.target as Node)) {
@@ -194,7 +215,7 @@ onUnmounted(() => {
     </div>
 
     <!-- 最近文件按钮 -->
-    <div class="recent-menu-container">
+    <div class="recent-menu-container" ref="recentMenuContainer">
       <button 
         ref="recentMenuButton"
         class="toolbar-btn" 
@@ -209,22 +230,58 @@ onUnmounted(() => {
       </button>
       
       <!-- 最近文件下拉菜单 -->
-      <div v-if="showRecentMenu" class="recent-dropdown">
-        <div v-if="recentFiles.length === 0" class="recent-empty">
-          暂无最近文件
+      <div v-if="showRecentMenu" class="recent-dropdown custom-scrollbar">
+        <!-- Tab 栏 -->
+        <div class="recent-tabs">
+          <button 
+            class="recent-tab" 
+            :class="{ active: activeRecentTab === 'files' }"
+            @click="activeRecentTab = 'files'"
+          >文件</button>
+          <button 
+            class="recent-tab" 
+            :class="{ active: activeRecentTab === 'folders' }"
+            @click="activeRecentTab = 'folders'"
+          >文件夹</button>
         </div>
-        <ul v-else class="recent-list">
-          <li 
-            v-for="file in recentFiles" 
-            :key="file.path"
-            class="recent-item"
-            @click="openRecentFile(file.path)"
-            :title="file.path"
-          >
-            <span class="recent-file-name">{{ file.name }}</span>
-            <span class="recent-file-path">{{ file.path }}</span>
-          </li>
-        </ul>
+
+        <!-- 文件列表 -->
+        <div v-if="activeRecentTab === 'files'" class="recent-tab-content">
+          <div v-if="recentFiles.length === 0" class="recent-empty">
+            暂无最近文件
+          </div>
+          <ul v-else class="recent-list">
+            <li 
+              v-for="file in recentFiles" 
+              :key="file.path"
+              class="recent-item"
+              @click="openRecentFile(file.path)"
+              :title="file.path"
+            >
+              <span class="recent-file-name">{{ file.name }}</span>
+              <span class="recent-file-path">{{ file.path }}</span>
+            </li>
+          </ul>
+        </div>
+
+        <!-- 文件夹列表 -->
+        <div v-if="activeRecentTab === 'folders'" class="recent-tab-content">
+          <div v-if="recentFolders.length === 0" class="recent-empty">
+            暂无最近文件夹
+          </div>
+          <ul v-else class="recent-list">
+            <li 
+              v-for="folder in recentFolders" 
+              :key="folder.path"
+              class="recent-item"
+              @click="openRecentFolder(folder.path)"
+              :title="folder.path"
+            >
+              <span class="recent-file-name">{{ folder.name }}</span>
+              <span class="recent-file-path">{{ folder.path }}</span>
+            </li>
+          </ul>
+        </div>
       </div>
     </div>
 
@@ -242,7 +299,7 @@ onUnmounted(() => {
       </svg>
       新建
     </button>
-    <button class="toolbar-btn" @click="$emit('save')">
+    <button class="toolbar-btn" :disabled="isHtmlActive" :class="{ disabled: isHtmlActive }" @click="$emit('save')">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
         <polyline points="17 21 17 13 7 13 7 21" />
@@ -250,7 +307,7 @@ onUnmounted(() => {
       </svg>
       保存
     </button>
-    <button class="toolbar-btn" @click="$emit('save-as')">
+    <button class="toolbar-btn" :disabled="isHtmlActive" :class="{ disabled: isHtmlActive }" @click="$emit('save-as')">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
         <polyline points="14 2 14 8 20 8" />
@@ -259,7 +316,7 @@ onUnmounted(() => {
       </svg>
       另存为
     </button>
-    <button class="toolbar-btn" @click="$emit('toggle-mode')">
+    <button class="toolbar-btn" :disabled="isHtmlActive" :class="{ disabled: isHtmlActive }" @click="$emit('toggle-mode')">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
         <circle cx="12" cy="12" r="3" />
@@ -408,6 +465,12 @@ onUnmounted(() => {
   border-color: #ccc;
 }
 
+.toolbar-btn.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
 /* 下拉箭头 */
 .dropdown-arrow {
   margin-left: 2px;
@@ -537,6 +600,40 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 最近菜单 Tab 栏 */
+.recent-tabs {
+  display: flex;
+  border-bottom: 1px solid #e8e8e8;
+  padding: 0 4px;
+}
+
+.recent-tab {
+  flex: 1;
+  padding: 8px 16px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  font-size: 13px;
+  color: #666;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.recent-tab:hover {
+  color: #333;
+}
+
+.recent-tab.active {
+  color: #333;
+  font-weight: 500;
+  border-bottom-color: #4a90d9;
+}
+
+.recent-tab-content {
+  max-height: 360px;
+  overflow-y: auto;
 }
 
 /* 字体设置面板容器 */
@@ -697,6 +794,23 @@ html.dark .recent-file-name {
 
 html.dark .recent-file-path {
   color: #888;
+}
+
+html.dark .recent-tabs {
+  border-bottom-color: #3a3a3a;
+}
+
+html.dark .recent-tab {
+  color: #999;
+}
+
+html.dark .recent-tab:hover {
+  color: #ddd;
+}
+
+html.dark .recent-tab.active {
+  color: #ddd;
+  border-bottom-color: #5b9bd5;
 }
 
 html.dark .font-panel {

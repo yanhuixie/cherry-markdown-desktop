@@ -1,10 +1,14 @@
 import { reactive, ref } from 'vue';
 import { FileSyncStatus, transitionOnEdit, transitionOnSave } from './fileSyncStatus';
+import { normalizePathSeparator, splitPath } from '../utils/pathUtils';
+
+export type FileType = 'markdown' | 'html';
 
 export interface TabItem {
   id: string;
   filePath: string;
   fileName: string;
+  fileType: FileType;
   content: string;
 
   // === 新的状态字段 ===
@@ -36,6 +40,10 @@ export interface TabItem {
   editorMode?: 'previewOnly' | 'edit&preview'; // 编辑器模式：预览模式 或 双栏编辑模式
 }
 
+export function isHtmlTab(tab: TabItem): boolean {
+  return tab.fileType === 'html';
+}
+
 export interface RecentFile {
   path: string;
   name: string;
@@ -63,7 +71,7 @@ const loadRecentFilesFromStorage = (): RecentFile[] => {
       const parsed = JSON.parse(saved);
       // 类型校验：确保是数组且每个元素都符合 RecentFile 类型
       if (Array.isArray(parsed) && parsed.every(isValidRecentFile)) {
-        return parsed;
+        return parsed.map(f => ({ ...f, path: normalizePathSeparator(f.path) }));
       } else {
         console.warn('[tabStore] localStorage 数据格式无效，已忽略');
       }
@@ -98,11 +106,13 @@ export function addRecentFile(filePath: string) {
     return;
   }
 
+  const normalizedPath = normalizePathSeparator(filePath);
+
   const fileName = filePath.split(/[/\\]/).pop() || filePath;
   const now = Date.now();
 
   // 检查是否已存在
-  const existingIndex = recentFiles.findIndex(f => f.path === filePath);
+  const existingIndex = recentFiles.findIndex(f => f.path === normalizedPath);
 
   if (existingIndex >= 0) {
     // 更新访问时间
@@ -110,7 +120,7 @@ export function addRecentFile(filePath: string) {
   } else {
     // 添加新文件
     recentFiles.push({
-      path: filePath,
+      path: normalizedPath,
       name: fileName,
       lastAccessed: now,
     });
@@ -142,6 +152,86 @@ export function removeRecentFile(filePath: string) {
   }
 }
 
+// === RecentFolder 功能 ===
+
+export interface RecentFolder {
+  path: string;
+  name: string;
+  lastAccessed: number;
+}
+
+const FOLDERS_STORAGE_KEY = 'cherry_markdown_recent_folders';
+
+function isValidRecentFolder(item: unknown): item is RecentFolder {
+  return typeof item === 'object' &&
+         item !== null &&
+         typeof (item as RecentFolder).path === 'string' &&
+         typeof (item as RecentFolder).name === 'string';
+}
+
+const loadRecentFoldersFromStorage = (): RecentFolder[] => {
+  try {
+    const saved = localStorage.getItem(FOLDERS_STORAGE_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed) && parsed.every(isValidRecentFolder)) {
+        return parsed.map(f => ({ ...f, path: normalizePathSeparator(f.path) }));
+      } else {
+        console.warn('[tabStore] localStorage 文件夹数据格式无效，已忽略');
+      }
+    }
+  } catch (error) {
+    console.warn('[tabStore] 加载最近文件夹失败:', error);
+  }
+  return [];
+};
+
+const saveRecentFoldersToStorage = (folders: RecentFolder[]) => {
+  try {
+    const foldersToSave = folders.slice(0, 20);
+    localStorage.setItem(FOLDERS_STORAGE_KEY, JSON.stringify(foldersToSave));
+  } catch (error) {
+    console.warn('[tabStore] 保存最近文件夹失败:', error);
+  }
+};
+
+export const recentFolders = reactive<RecentFolder[]>(loadRecentFoldersFromStorage());
+
+export function addRecentFolder(folderPath: string) {
+  const normalizedPath = normalizePathSeparator(folderPath);
+  const folderName = splitPath(normalizedPath).filter(Boolean).pop() || folderPath;
+  const now = Date.now();
+
+  const existingIndex = recentFolders.findIndex(f => f.path === normalizedPath);
+
+  if (existingIndex >= 0) {
+    recentFolders[existingIndex].lastAccessed = now;
+  } else {
+    recentFolders.push({
+      path: normalizedPath,
+      name: folderName,
+      lastAccessed: now,
+    });
+  }
+
+  recentFolders.sort((a, b) => b.lastAccessed - a.lastAccessed);
+
+  saveRecentFoldersToStorage(recentFolders);
+}
+
+export function removeRecentFolder(folderPath: string) {
+  const index = recentFolders.findIndex(f => f.path === folderPath);
+  if (index !== -1) {
+    recentFolders.splice(index, 1);
+    saveRecentFoldersToStorage(recentFolders);
+  }
+}
+
+export function clearRecentFolders() {
+  recentFolders.splice(0, recentFolders.length);
+  localStorage.removeItem(FOLDERS_STORAGE_KEY);
+}
+
 /**
  * 创建新的标签项
  * 根据文件路径和内容自动确定初始状态
@@ -154,9 +244,13 @@ export function createTabItem(
 ): TabItem {
   const fileName = filePath.split(/[/\\]/).pop() || filePath;
 
-  // 确定初始同步状态
+  const lowerName = fileName.toLowerCase();
+  const fileType: FileType = lowerName.endsWith('.html') || lowerName.endsWith('.htm') ? 'html' : 'markdown';
+
   let syncStatus: FileSyncStatus;
-  if (isNewFile || filePath.startsWith('untitled')) {
+  if (fileType === 'html') {
+    syncStatus = FileSyncStatus.READ_ONLY;
+  } else if (isNewFile || filePath.startsWith('untitled')) {
     syncStatus = FileSyncStatus.UNNAMED;
   } else if (/^https?:\/\//.test(filePath)) {
     syncStatus = FileSyncStatus.READ_ONLY;
@@ -168,7 +262,8 @@ export function createTabItem(
     id,
     filePath,
     fileName,
-    content,
+    fileType,
+    content: fileType === 'html' ? '' : content,
     syncStatus,
     fileLastModified: isNewFile ? undefined : Date.now(),
     lastSyncedModified: isNewFile ? undefined : Date.now(),

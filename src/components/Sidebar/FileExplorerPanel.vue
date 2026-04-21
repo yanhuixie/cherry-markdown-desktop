@@ -75,7 +75,7 @@ function emitOpenFolder() {
     </div>
 
     <!-- 内容区域 -->
-    <div class="panel-content">
+    <div class="panel-content custom-scrollbar">
       <!-- 未打开文件夹的空状态 -->
       <div v-if="showEmptyState" class="empty-state">
         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">

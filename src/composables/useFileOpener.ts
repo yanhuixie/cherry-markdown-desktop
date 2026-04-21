@@ -19,11 +19,11 @@ export function useFileOpener(onOpenFile: (filePath: string, content: string) =>
         console.log('[useFileOpener] Received open-file-request event:', filePath);
 
         try {
-          // 读取文件内容
-          const content = await readTextFile(filePath);
+          const lowerPath = filePath.toLowerCase();
+          const isHtml = lowerPath.endsWith('.html') || lowerPath.endsWith('.htm');
+          const content = isHtml ? '' : await readTextFile(filePath);
           console.log('[useFileOpener] File read successfully, content length:', content.length);
 
-          // 调用回调函数处理文件打开
           onOpenFile(filePath, content);
         } catch (error) {
           console.error('[useFileOpener] Failed to open file:', error);

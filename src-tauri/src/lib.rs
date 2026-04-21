@@ -1,15 +1,15 @@
 // Prevents additional console window on Windows in release builds
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use chrono::Local;
 use log::{LevelFilter, Metadata, Record};
+use std::backtrace::Backtrace;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::panic;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_cli::CliExt;
-use std::panic;
-use std::backtrace::Backtrace;
-use chrono::Local;
 
 // 全局状态：保存待打开的文件路径
 struct AppState {
@@ -125,11 +125,7 @@ fn setup_global_panic_hook() {
 
         // 尝试写入日志文件
         let log_path = get_log_path();
-        if let Ok(mut file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-        {
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
             let _ = file.write_all(panic_message.as_bytes());
             let _ = file.write_all(b"\n");
             let _ = file.flush();
@@ -208,7 +204,10 @@ fn test_panic(mode: String) -> Result<String, String> {
         }
         _ => {
             log::info!("Test command called with unknown mode");
-            Ok(format!("Unknown mode: {}. Use: unwrap, expect, panic, or error", mode))
+            Ok(format!(
+                "Unknown mode: {}. Use: unwrap, expect, panic, or error",
+                mode
+            ))
         }
     }
 }
@@ -246,7 +245,10 @@ pub fn run() {
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             // 当尝试启动第二个实例时，这个回调会被执行
-            log::info!("Single instance: Another instance tried to start with args: {:?}", args);
+            log::info!(
+                "Single instance: Another instance tried to start with args: {:?}",
+                args
+            );
 
             // 1. 聚焦到主窗口
             if let Some(window) = app.get_webview_window("main") {
@@ -260,8 +262,12 @@ pub fn run() {
                 let file_path_lower = file_path.to_lowercase();
 
                 // 验证文件是否是 md 文件（大小写不敏感）
-                if file_path_lower.ends_with(".md") || file_path_lower.ends_with(".markdown") {
-                    log::info!("Single instance: Opening markdown file: {}", file_path);
+                if file_path_lower.ends_with(".md")
+                    || file_path_lower.ends_with(".markdown")
+                    || file_path_lower.ends_with(".html")
+                    || file_path_lower.ends_with(".htm")
+                {
+                    log::info!("Single instance: Opening file: {}", file_path);
 
                     // 3. 向前端发送事件，传递文件路径
                     if let Err(e) = app.emit("open-file-request", file_path) {
@@ -270,7 +276,10 @@ pub fn run() {
                         log::info!("Single instance: Event emitted successfully");
                     }
                 } else {
-                    log::warn!("Single instance: File is not a markdown file: {}", file_path);
+                    log::warn!(
+                        "Single instance: File is not a markdown file: {}",
+                        file_path
+                    );
                 }
             } else {
                 log::info!("Single instance: No file path in arguments");
@@ -302,6 +311,8 @@ pub fn run() {
                             // 验证文件是否是 md 文件（大小写不敏感）
                             if file_path_lower.ends_with(".md")
                                 || file_path_lower.ends_with(".markdown")
+                                || file_path_lower.ends_with(".html")
+                                || file_path_lower.ends_with(".htm")
                             {
                                 log::info!("Saving markdown file to state: {}", file_path_str);
 
@@ -347,11 +358,7 @@ pub fn run() {
 
         // 记录到日志文件
         let log_path = get_log_path();
-        if let Ok(mut file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-        {
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
             let _ = file.write_all(error_message.as_bytes());
             let _ = file.write_all(b"\n");
             let _ = file.flush();

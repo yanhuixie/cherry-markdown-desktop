@@ -1,4 +1,5 @@
 import { reactive, ref } from 'vue';
+import { normalizePathSeparator } from '../utils/pathUtils';
 
 /** 文件树节点 */
 export interface FileTreeNode {
@@ -8,6 +9,10 @@ export interface FileTreeNode {
   children: FileTreeNode[];
   isExpanded: boolean;
   isLoading: boolean;
+  /** 文件/目录最后修改时间（毫秒时间戳） */
+  modifiedTime: number | null;
+  /** 文件大小（字节），目录为 null */
+  fileSize: number | null;
 }
 
 /** 侧边栏标签类型 */
@@ -188,9 +193,10 @@ export function setActiveSidebarTab(tab: SidebarTab): void {
 /**
  * 检查文件是否为 Markdown 文件
  */
-function isMarkdownFile(name: string): boolean {
+function isSupportedFile(name: string): boolean {
   const lowerName = name.toLowerCase();
-  return lowerName.endsWith('.md') || lowerName.endsWith('.markdown');
+  return lowerName.endsWith('.md') || lowerName.endsWith('.markdown')
+    || lowerName.endsWith('.html') || lowerName.endsWith('.htm');
 }
 
 /**
@@ -203,14 +209,19 @@ function isHidden(name: string): boolean {
 /**
  * 创建文件树节点
  */
-function createTreeNode(name: string, path: string, isDirectory: boolean): FileTreeNode {
+function createTreeNode(
+  name: string, path: string, isDirectory: boolean,
+  mtime: number | null = null, size: number | null = null,
+): FileTreeNode {
   return {
     name,
-    path,
+    path: normalizePathSeparator(path),
     isDirectory,
     children: [],
-    isExpanded: expandedNodePaths.value.has(path),
+    isExpanded: expandedNodePaths.value.has(normalizePathSeparator(path)),
     isLoading: false,
+    modifiedTime: mtime,
+    fileSize: isDirectory ? null : size,
   };
 }
 
@@ -233,8 +244,8 @@ function sortTreeNodes(nodes: FileTreeNode[]): void {
  */
 async function importTauriFs() {
   try {
-    const { readDir } = await import('@tauri-apps/plugin-fs');
-    return { readDir };
+    const { readDir, stat } = await import('@tauri-apps/plugin-fs');
+    return { readDir, stat };
   } catch (error) {
     console.error('[sidebarStore] 导入 Tauri FS 模块失败:', error);
     throw new Error('无法加载文件系统模块');
@@ -259,7 +270,7 @@ export async function loadDirectoryContents(
   }
 
   try {
-    const { readDir } = await importTauriFs();
+    const { readDir, stat } = await importTauriFs();
     const entries = await readDir(dirPath);
     const nodes: FileTreeNode[] = [];
 
@@ -269,21 +280,29 @@ export async function loadDirectoryContents(
         continue;
       }
 
-      // 构建完整路径
-      const fullPath = dirPath.endsWith('/') || dirPath.endsWith('\\')
-        ? dirPath + entry.name
-        : `${dirPath}/${entry.name}`;
+      // 构建完整路径（统一正斜杠）
+      const normalizedDir = normalizePathSeparator(dirPath);
+      const fullPath = `${normalizedDir}/${entry.name}`;
 
       if (entry.isDirectory) {
-        // 目录：创建节点，如果之前已展开则加载子节点
-        const node = createTreeNode(entry.name, fullPath, true);
+        // 目录：不获取元数据，直接创建节点
+        const node = createTreeNode(entry.name, fullPath, true, null, null);
         if (node.isExpanded) {
           node.children = await loadDirectoryContents(fullPath, maxDepth, currentDepth + 1);
         }
         nodes.push(node);
-      } else if (entry.isFile && isMarkdownFile(entry.name)) {
-        // Markdown 文件：创建节点
-        nodes.push(createTreeNode(entry.name, fullPath, false));
+      } else if (entry.isFile && isSupportedFile(entry.name)) {
+        // 文件：获取元数据后创建节点
+        let mtime: number | null = null;
+        let size: number | null = null;
+        try {
+          const info = await stat(fullPath);
+          mtime = info.mtime?.getTime() ?? null;
+          size = info.size;
+        } catch (e) {
+          console.warn(`[sidebarStore] stat 失败: "${fullPath}"`, e);
+        }
+        nodes.push(createTreeNode(entry.name, fullPath, false, mtime, size));
       }
     }
 
